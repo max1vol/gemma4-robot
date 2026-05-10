@@ -157,3 +157,63 @@ Useful source references for this protocol:
 - LEGO Robot Inventor hub API: `https://lego.github.io/MINDSTORMS-Robot-Inventor-hub-API/`
 - `lego-hub-tk`: `https://github.com/smr99/lego-hub-tk`
 - Tufts SPIKE Web Interface source: `https://tuftsceeo.github.io/SPIKE-Web-Interface/ServiceDock_SPIKE.js.html`
+
+## AIY Voice Kit HAT
+
+The same Pi at `100.95.196.115` also has a Google AIY Voice Kit HAT/Bonnet-style audio board with dual microphones, a button, and a speaker. Use it only as local hardware. Do not use Google Assistant, Google Cloud Speech, or any cloud speech APIs unless explicitly requested.
+
+The official AIY Python library exposes audio as ALSA command wrappers. The important module is `aiy.voice.audio`; its `aplay()` and `arecord()` helpers build normal `aplay` and `arecord` commands, and its `play_wav()` / `record_file()` helpers call those commands. That means the reliable low-level interface is plain ALSA:
+
+```sh
+aplay -l
+arecord -l
+aplay -D default /path/to/effect.wav
+arecord -D default -f S16_LE -r 44100 -c 2 -d 3 /tmp/test.wav
+```
+
+If the HAT is installed correctly, ALSA should expose a Google/AIY/Voice sound card. Historical device names for this board include strings like `snd_rpi_googlevoicehat_soundcard`, but always inspect the live Pi with `aplay -l`, `arecord -l`, and `/proc/asound/cards`.
+
+The official AIY button API is `aiy.board.Board`. It uses GPIO, with defaults from the source:
+
+```text
+BUTTON_PIN = 23
+LED_PIN = 25
+```
+
+Use `Board().button.wait_for_press()` or `button.when_pressed = callback` for the hardware button. For the LED, `Board().led` is the compatibility path that works with Voice HAT v1; `aiy.leds` is for newer Voice/Vision Bonnet RGB LEDs and is not compatible with the Voice HAT v1.
+
+To play a local test effect without Google services, prefer ALSA directly. A safe quick test is a short generated WAV played through the default PCM:
+
+```sh
+python3 - <<'PY'
+import math
+import struct
+import wave
+
+path = "/tmp/voice-kit-test.wav"
+rate = 44100
+with wave.open(path, "wb") as wav:
+    wav.setnchannels(1)
+    wav.setsampwidth(2)
+    wav.setframerate(rate)
+    frames = []
+    for i in range(int(rate * 0.45)):
+        t = i / rate
+        freq = 660 if t < 0.22 else 880
+        amp = int(13000 * math.sin(2 * math.pi * freq * t))
+        frames.append(struct.pack("<h", amp))
+    wav.writeframes(b"".join(frames))
+print(path)
+PY
+aplay -D default /tmp/voice-kit-test.wav
+```
+
+If `default` does not route to the HAT speaker, repeat with the concrete device from `aplay -l`, for example `plughw:0,0` or `plughw:1,0`.
+
+Official references checked:
+
+- Voice Kit guide: `https://aiyprojects.withgoogle.com/voice/`
+- AIY Python API docs: `https://aiyprojects.readthedocs.io/`
+- AIY source repository: `https://github.com/google/aiyprojects-raspbian`
+- AIY audio source: `https://raw.githubusercontent.com/google/aiyprojects-raspbian/aiyprojects/src/aiy/voice/audio.py`
+- AIY board/button source: `https://raw.githubusercontent.com/google/aiyprojects-raspbian/aiyprojects/src/aiy/board.py`

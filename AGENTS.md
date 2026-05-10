@@ -191,6 +191,40 @@ Telemetry confirmed the motor on `B`:
 ports {'B': [75, [0, 90, 85, 0]]}
 ```
 
+For interactive button control, use `scripts/hub_button_motor_controller.py`. It listens to the hub's left/right arrow button events over the same RFCOMM JSON stream. The default mapping is:
+
+```text
+right arrow -> motor B +90 degrees
+left arrow  -> motor B -90 degrees
+```
+
+Copy it to the Pi and run it detached:
+
+```sh
+ssh max@192.168.1.174 'mkdir -p ~/gemma4-robot/scripts'
+scp scripts/hub_button_motor_controller.py max@192.168.1.174:~/gemma4-robot/scripts/
+ssh max@192.168.1.174 'nohup python3 ~/gemma4-robot/scripts/hub_button_motor_controller.py --port B --degrees 90 --speed 40 > /tmp/hub_button_motor_controller.log 2>&1 & echo $! > /tmp/hub_button_motor_controller.pid'
+```
+
+Check it with:
+
+```sh
+ssh max@192.168.1.174 'tail -80 /tmp/hub_button_motor_controller.log; ps -fp $(cat /tmp/hub_button_motor_controller.pid)'
+```
+
+Observed working log:
+
+```text
+connected to A8:E2:C1:9A:5D:04 on RFCOMM channel 1
+ready: right arrow = +90 deg, left arrow = -90 deg on motor B
+left button -> backward
+sent ctrl0001: motor B -90 degrees
+response ctrl0001: 0
+right button -> forward
+sent ctrl0002: motor B +90 degrees
+response ctrl0002: 0
+```
+
 Useful source references for this protocol:
 
 - LEGO Robot Inventor hub API: `https://lego.github.io/MINDSTORMS-Robot-Inventor-hub-API/`

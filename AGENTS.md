@@ -217,3 +217,20 @@ Official references checked:
 - AIY source repository: `https://github.com/google/aiyprojects-raspbian`
 - AIY audio source: `https://raw.githubusercontent.com/google/aiyprojects-raspbian/aiyprojects/src/aiy/voice/audio.py`
 - AIY board/button source: `https://raw.githubusercontent.com/google/aiyprojects-raspbian/aiyprojects/src/aiy/board.py`
+
+## Pi 3B+ No-Boot Recovery Checklist
+
+If `100.95.196.115` drops off Tailscale after adding the Voice Kit HAT and the Pi 3B+ shows only the red power LED with no HDMI output, do not assume the Pi is burned immediately. Diagnose in this order:
+
+1. Power off and unplug everything.
+2. Remove the AIY Voice Kit HAT/Bonnet completely from the 40-pin header.
+3. Disconnect the HAT speaker, button, microphone board, LEGO hub USB cable, and any other USB devices.
+4. Inspect the 40-pin header carefully. A one-pin offset HAT install can short 5V, 3V3, ground, or GPIO pins.
+5. Boot the bare Pi only: Pi + known-good microSD + known-good 5V/2.5A power supply + HDMI monitor already powered on.
+6. Watch both LEDs. On Pi 3B+, red is power. Green ACT should flash for SD-card activity. A solid red LED with no green ACT usually means the board is powered but is not reading/booting from the SD card.
+7. Try a freshly imaged Raspberry Pi OS Lite card, preferably a different known-good microSD. Pi 3B+ needs boot files new enough for 3B+ hardware.
+8. If green ACT flashes irregularly but HDMI is blank, then the Pi may be booting and the issue may be HDMI mode. Try another cable/monitor or add conservative HDMI settings to `/boot/config.txt`.
+9. If the bare Pi will not show green ACT with multiple known-good SD cards and power supplies, measure rails with a multimeter: pin 2 or 4 to pin 6 should be about 5V; pin 1 to pin 6 should be about 3.3V.
+10. If 3.3V is missing or the SoC gets hot within seconds, assume hardware damage and stop powering it.
+
+Once the bare Pi boots again, shut down cleanly and reconnect the Voice Kit HAT only after confirming it is aligned on all 40 pins. Then re-test Tailscale and ALSA before attaching the LEGO hub or other peripherals.

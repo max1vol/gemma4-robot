@@ -4,7 +4,13 @@
 
 The LEGO hub used for this project is a LEGO MINDSTORMS Robot Inventor / SPIKE Prime compatible Technic Large Hub. It is reachable from the Raspberry Pi 3 over Bluetooth Classic RFCOMM, not over USB in the current setup.
 
-Connect to the Pi with:
+The current fresh Raspberry Pi OS setup is reachable over LAN SSH as:
+
+```sh
+ssh max@192.168.1.174
+```
+
+Earlier work used Tailscale to the old host address:
 
 ```sh
 tailscale ssh pi@100.95.196.115
@@ -150,7 +156,40 @@ Rotate port `A` by 90 degrees:
 
 ## Notes From Discovery
 
-USB did not enumerate in this session. `lsusb` did not show a LEGO device and no `/dev/ttyACM*` appeared. Treat Bluetooth RFCOMM as the current working transport.
+USB did not enumerate in the original session. `lsusb` did not show a LEGO device and no `/dev/ttyACM*` appeared. Treat Bluetooth RFCOMM as the current working transport.
+
+After replacing the failed SD card and installing fresh Raspberry Pi OS, Bluetooth had to be powered explicitly:
+
+```sh
+sudo systemctl restart bluetooth
+sudo hciconfig hci0 up
+sudo btmgmt power on
+```
+
+The same hub then paired over Bluetooth Classic with:
+
+```sh
+sudo btmgmt connectable on
+sudo btmgmt fast-conn on
+sudo btmgmt discov on
+sudo btmgmt bondable on
+sudo btmgmt pairable on
+sudo btmgmt ssp on
+sudo btmgmt io-cap 4
+sudo timeout 25s btmgmt pair -c 4 -t 0 A8:E2:C1:9A:5D:04
+```
+
+On the fresh OS, rotating motor `B` by 90 degrees succeeded with:
+
+```json
+{"i":"mb90","m":"scratch.motor_run_for_degrees","p":{"port":"B","speed":40,"degrees":90,"stall":true,"stop":1}}
+```
+
+Telemetry confirmed the motor on `B`:
+
+```text
+ports {'B': [75, [0, 90, 85, 0]]}
+```
 
 Useful source references for this protocol:
 

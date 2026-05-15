@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gemma Voice Display</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090b10;
+      --panel: #111720;
+      --panel-2: #151c26;
+      --text: #f4f7fb;
+      --muted: #9aa8b8;
+      --accent: #60d394;
+      --wait: #f0c46a;
+      --error: #ff6b6b;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    main {
+      display: grid;
+      grid-template-rows: 54px 1fr 1fr;
+      gap: 10px;
+      height: 100vh;
+      padding: 12px;
+    }
+
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      min-width: 0;
+      padding: 0 4px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 750;
+      letter-spacing: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 16px;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 16px rgba(96, 211, 148, 0.8);
+    }
+
+    .busy .dot {
+      background: var(--wait);
+      box-shadow: 0 0 16px rgba(240, 196, 106, 0.8);
+    }
+
+    .error .dot {
+      background: var(--error);
+      box-shadow: 0 0 16px rgba(255, 107, 107, 0.8);
+    }
+
+    section {
+      min-height: 0;
+      padding: 16px 18px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    section.output {
+      background: var(--panel-2);
+    }
+
+    h2 {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 18px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+
+    .text {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 5;
+      overflow: hidden;
+      font-size: 30px;
+      line-height: 1.15;
+      font-weight: 650;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .placeholder {
+      color: #657284;
+      font-weight: 550;
+    }
+
+    .meta {
+      position: fixed;
+      right: 14px;
+      bottom: 8px;
+      color: #556273;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <main id="root">
+    <header>
+      <h1>Gemma Voice</h1>
+      <div class="status" id="status"><span class="dot"></span><span id="statusText">Starting</span></div>
+    </header>
+    <section>
+      <h2>Input</h2>
+      <div class="text placeholder" id="input">Hold the button and speak.</div>
+    </section>
+    <section class="output">
+      <h2>Model Output</h2>
+      <div class="text placeholder" id="output">The response will appear here.</div>
+    </section>
+  </main>
+  <div class="meta" id="updated"></div>
+
+  <script>
+    const root = document.getElementById("root");
+    const input = document.getElementById("input");
+    const output = document.getElementById("output");
+    const statusText = document.getElementById("statusText");
+    const updated = document.getElementById("updated");
+
+    const labels = {
+      idle: "Ready",
+      recording: "Recording",
+      processing: "Transcribing",
+      thinking: "Thinking",
+      speaking: "Speaking",
+      reset: "Reset",
+      error: "Error"
+    };
+
+    function setText(node, text, fallback) {
+      node.textContent = text || fallback;
+      node.classList.toggle("placeholder", !text);
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch(`/status.json?ts=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const status = await response.json();
+        const state = status.state || "idle";
+        root.classList.toggle("busy", ["recording", "processing", "thinking", "speaking"].includes(state));
+        root.classList.toggle("error", state === "error");
+        statusText.textContent = status.error ? `${labels[state] || state}: ${status.error}` : (labels[state] || state);
+        setText(input, status.input, "Hold the button and speak.");
+        setText(output, status.output, "The response will appear here.");
+        updated.textContent = status.updated_at || "";
+      } catch (error) {
+        root.classList.add("error");
+        statusText.textContent = `Display disconnected: ${error.message}`;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 500);
+  </script>
+</body>
+</html>

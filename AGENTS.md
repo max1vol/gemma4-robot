@@ -249,6 +249,39 @@ tailscale ssh max@pi3 'lsusb | grep -Ei "mbed|micro|0d28"; ls -l /dev/ttyACM0 /d
 
 Use `scripts/microbit/flash_microbit_via_pi.py` to build and flash MicroPython programs. It builds a `.hex` with `py2hex`, streams it to the Pi through `tailscale ssh max@pi3`, mounts the Pi's `MICROBIT` drive, and copies the file as `MICROBIT.HEX` for DAPLink flashing.
 
+For ELECFREAKS PlanetX sensors that need MakeCode extensions, use the local MakeCode/PXT project under:
+
+```text
+scripts/microbit/makecode_planetx_readings/
+```
+
+Build it in a temporary PXT workspace and flash the micro:bit V2/CODAL hex, not the combined `binary.hex`. The combined MakeCode `binary.hex` is larger and DAPLink on `pi3` has reported:
+
+```text
+FAIL.TXT: error: The transfer timed out.
+```
+
+The smaller V2-only output that worked is:
+
+```text
+/tmp/gemma4-pxt/sensor-readings/built/mbcodal-binary.hex
+```
+
+You can flash an already-built MakeCode hex with the existing helper function:
+
+```sh
+python3 - <<'PY'
+import importlib.util
+from pathlib import Path
+
+helper_path = Path("scripts/microbit/flash_microbit_via_pi.py").resolve()
+spec = importlib.util.spec_from_file_location("flash_microbit_via_pi", helper_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.flash_hex(Path("/tmp/gemma4-pxt/sensor-readings/built/mbcodal-binary.hex"))
+PY
+```
+
 Install the local build tool once if needed:
 
 ```sh
@@ -287,6 +320,55 @@ Do not flash the motor example unless the mechanism is safe to move.
 
 The verified MicroPython REPL check over `/dev/ttyACM0` returned `42` for `print(6*7)`, confirming the flashed MicroPython runtime was active on the micro:bit.
 
+### PlanetX Sensor Findings
+
+The PlanetX MakeCode package maps Nezha RJ ports as:
+
+```text
+J1 analog -> micro:bit P1
+J1 digital -> micro:bit P8
+J2 analog -> micro:bit P2
+J2 digital -> micro:bit P12
+```
+
+For the current sensor setup:
+
+```text
+J2: EF05030 CO2 sensor
+J1: temperature sensor under investigation
+```
+
+Verified J2 CO2 readings over USB serial were stable. Observed examples:
+
+```text
+co2_raw=14..19
+co2_value=1002..1013
+```
+
+`co2_value` is the ELECFREAKS package value (`1024 - analogRead(P2)`), not calibrated ppm.
+
+The J1 temperature sensor did not behave like the documented EF05041 DS18B20 before the cable was reseated. Native `PlanetX_Basic.Ds18b20Temp(J1)` returned `-Infinity`, and a direct DS18B20 pin scan on P1/P2/P8/P12/P14/P16 also returned `-Infinity`. A DHT11-style PlanetX probe on J1 returned `0` temperature and `0` humidity. A clean analog-only J1 probe showed a real analog signal around:
+
+```text
+j1_p1_raw=631..643
+millivolts=2035..2074
+```
+
+After reseating the J1 cable, `serial_alive_probe.ts` flashed as the V2/CODAL hex and printed `alive sample=...`, confirming the micro:bit USB serial path was healthy. The guarded V2/CODAL scan in `main.ts` then ran and printed progress through all protocol calls. Current post-reseat observations were:
+
+```text
+co2_raw=10..15
+co2_value=1006..1012
+j1_analog_p1=209..214
+j1_digital_p8=0
+dht11_temp_j1=0
+dht11_humidity_j1=0
+temp_j1=-Infinity
+temp_p1/temp_p2/temp_p8/temp_p12/temp_p14/temp_p16=-Infinity
+```
+
+So J1 still does not decode as EF05041 DS18B20 or DHT11 after reseating. It does present a nonzero analog P1 signal, but no temperature conversion formula has been verified for that signal.
+
 Reference files:
 
 - `MICROBIT_NEZHA_PRO.md`
@@ -294,6 +376,9 @@ Reference files:
 - `scripts/microbit/microbit_heart.py`
 - `scripts/microbit/microbit_nezha_test.py`
 - `scripts/microbit/microbit_nezha_v2_motor_buttons.py`
+- `scripts/microbit/makecode_planetx_readings/main.ts`
+- `scripts/microbit/makecode_planetx_readings/analog_j1_temperature_probe.ts`
+- `scripts/microbit/makecode_planetx_readings/serial_alive_probe.ts`
 
 ## AIY Voice Kit HAT
 

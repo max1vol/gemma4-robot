@@ -1,0 +1,18 @@
+[Unit]
+Description=Gemma HDMI Voice Kiosk
+Wants=network-online.target gemma-voice-bot.service
+After=network-online.target sound.target gemma-voice-bot.service
+
+[Service]
+Type=simple
+User=max
+Group=max
+WorkingDirectory=/home/max/gemma4-robot
+Environment=HOME=/home/max
+ExecStart=/home/max/gemma4-robot/scripts/voice-kit/start_voice_kiosk.sh --foreground
+Restart=always
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Gemma OpenAI Voice Bot
+Wants=network-online.target sound.target
+After=network-online.target sound.target
+
+[Service]
+Type=simple
+User=max
+Group=max
+WorkingDirectory=/home/max/gemma4-robot
+Environment=HOME=/home/max
+ExecStart=/home/max/gemma4-robot/scripts/voice-kit/openai_voice_chat_bot.py --playback-device plughw:1,0 --capture-device plughw:1,0 --startup-greeting=
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

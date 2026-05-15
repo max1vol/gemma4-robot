@@ -1,0 +1,14 @@
+{
+  "name": "planetx-readings",
+  "version": "0.0.1",
+  "description": "Read PlanetX CO2 on Nezha J2 and DS18B20 temperature on Nezha J1.",
+  "dependencies": {
+    "core": "*",
+    "microphone": "*",
+    "pxt-PlanetX": "github:elecfreaks/pxt-PlanetX#v1.6.3"
+  },
+  "files": [
+    "main.ts"
+  ],
+  "preferredEditor": "tsprj"
+}

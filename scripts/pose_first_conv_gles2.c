@@ -456,6 +456,12 @@ int main(int argc, char** argv) {
     }
   }
   glFinish();
+  snprintf(path, sizeof(path), "%s/gles_first_conv_out_u8.bin", dir);
+  FILE* dump = fopen(path, "wb");
+  if (dump) {
+    fwrite(out, 1, (size_t)OUT_H * OUT_W * OUT_C, dump);
+    fclose(dump);
+  }
 
   double mae = 0.0, qmae = 0.0;
   double mae_xflip = 0.0, mae_yflip = 0.0, mae_xyflip = 0.0;

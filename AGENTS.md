@@ -4,16 +4,10 @@
 
 The LEGO hub used for this project is a LEGO MINDSTORMS Robot Inventor / SPIKE Prime compatible Technic Large Hub. It is reachable from the Raspberry Pi 3 over Bluetooth Classic RFCOMM, not over USB in the current setup.
 
-The current fresh Raspberry Pi OS setup is reachable over LAN SSH as:
+The current Raspberry Pi OS setup is reachable over Tailscale as:
 
 ```sh
-ssh max@192.168.1.174
-```
-
-Earlier work used Tailscale to the old host address:
-
-```sh
-tailscale ssh pi@100.95.196.115
+tailscale ssh max@pi3
 ```
 
 The hub Bluetooth address discovered in this session was:
@@ -201,15 +195,15 @@ left arrow  -> motor B -90 degrees
 Copy it to the Pi and run it detached:
 
 ```sh
-ssh max@192.168.1.174 'mkdir -p ~/gemma4-robot/scripts'
-scp scripts/hub_button_motor_controller.py max@192.168.1.174:~/gemma4-robot/scripts/
-ssh max@192.168.1.174 'nohup python3 ~/gemma4-robot/scripts/hub_button_motor_controller.py --port B --degrees 90 --speed 40 > /tmp/hub_button_motor_controller.log 2>&1 & echo $! > /tmp/hub_button_motor_controller.pid'
+tailscale ssh max@pi3 'mkdir -p ~/gemma4-robot/scripts'
+tailscale ssh max@pi3 'cat > ~/gemma4-robot/scripts/hub_button_motor_controller.py' < scripts/hub_button_motor_controller.py
+tailscale ssh max@pi3 'nohup python3 ~/gemma4-robot/scripts/hub_button_motor_controller.py --port B --degrees 90 --speed 40 > /tmp/hub_button_motor_controller.log 2>&1 & echo $! > /tmp/hub_button_motor_controller.pid'
 ```
 
 Check it with:
 
 ```sh
-ssh max@192.168.1.174 'tail -80 /tmp/hub_button_motor_controller.log; ps -fp $(cat /tmp/hub_button_motor_controller.pid)'
+tailscale ssh max@pi3 'tail -80 /tmp/hub_button_motor_controller.log; ps -fp $(cat /tmp/hub_button_motor_controller.pid)'
 ```
 
 Observed working log:
@@ -231,9 +225,79 @@ Useful source references for this protocol:
 - `lego-hub-tk`: `https://github.com/smr99/lego-hub-tk`
 - Tufts SPIKE Web Interface source: `https://tuftsceeo.github.io/SPIKE-Web-Interface/ServiceDock_SPIKE.js.html`
 
+## micro:bit And ELECFREAKS Nezha Pro
+
+The ELECFREAKS Nezha Pro carrier uses an inserted BBC micro:bit V2. Program the micro:bit with MicroPython by flashing a `.hex` through the Pi's USB connection. The verified Pi access path is:
+
+```sh
+tailscale ssh max@pi3
+```
+
+When the micro:bit is connected correctly, the Pi sees:
+
+```text
+/dev/ttyACM0
+/dev/serial/by-id/usb-Arm_BBC_micro:bit_CMSIS-DAP_...-if01
+USB mass-storage label: MICROBIT
+```
+
+Verify from the Mac with:
+
+```sh
+tailscale ssh max@pi3 'lsusb | grep -Ei "mbed|micro|0d28"; ls -l /dev/ttyACM0 /dev/serial/by-id/*micro* 2>/dev/null || true; lsblk -o NAME,TRAN,SIZE,FSTYPE,LABEL,MOUNTPOINTS'
+```
+
+Use `scripts/microbit/flash_microbit_via_pi.py` to build and flash MicroPython programs. It builds a `.hex` with `py2hex`, streams it to the Pi through `tailscale ssh max@pi3`, mounts the Pi's `MICROBIT` drive, and copies the file as `MICROBIT.HEX` for DAPLink flashing.
+
+Install the local build tool once if needed:
+
+```sh
+/usr/bin/python3 -m pip install --user uflash
+```
+
+Safe heart display test:
+
+```sh
+python3 scripts/microbit/flash_microbit_via_pi.py scripts/microbit/microbit_heart.py
+```
+
+Smoke test:
+
+```sh
+python3 scripts/microbit/flash_microbit_via_pi.py scripts/microbit/microbit_nezha_test.py
+```
+
+After flashing `microbit_nezha_test.py`, the micro:bit scrolls `PI`; micro:bit button A scrolls `A`, and button B scrolls `B`.
+
+Nezha V2/Pro motor example:
+
+```sh
+python3 scripts/microbit/flash_microbit_via_pi.py scripts/microbit/microbit_nezha_v2_motor_buttons.py
+```
+
+That example assumes a safe smart motor/mechanism on Nezha motor port A/M1:
+
+```text
+micro:bit button A -> motor A clockwise 90 degrees at 30% speed
+micro:bit button B -> motor A counterclockwise 90 degrees at 30% speed
+micro:bit logo touch -> stop motor A
+```
+
+Do not flash the motor example unless the mechanism is safe to move.
+
+The verified MicroPython REPL check over `/dev/ttyACM0` returned `42` for `print(6*7)`, confirming the flashed MicroPython runtime was active on the micro:bit.
+
+Reference files:
+
+- `MICROBIT_NEZHA_PRO.md`
+- `scripts/microbit/flash_microbit_via_pi.py`
+- `scripts/microbit/microbit_heart.py`
+- `scripts/microbit/microbit_nezha_test.py`
+- `scripts/microbit/microbit_nezha_v2_motor_buttons.py`
+
 ## AIY Voice Kit HAT
 
-The same Pi at `100.95.196.115` also has a Google AIY Voice Kit HAT/Bonnet-style audio board with dual microphones, a button, and a speaker. Use it only as local hardware. Do not use Google Assistant, Google Cloud Speech, or any cloud speech APIs unless explicitly requested.
+The same Pi reachable as `max@pi3` over Tailscale also has a Google AIY Voice Kit HAT/Bonnet-style audio board with dual microphones, a button, and a speaker. Use it only as local hardware. Do not use Google Assistant, Google Cloud Speech, or any cloud speech APIs unless explicitly requested.
 
 The official AIY Python library exposes audio as ALSA command wrappers. The important module is `aiy.voice.audio`; its `aplay()` and `arecord()` helpers build normal `aplay` and `arecord` commands, and its `play_wav()` / `record_file()` helpers call those commands. That means the reliable low-level interface is plain ALSA:
 
@@ -293,7 +357,7 @@ Official references checked:
 
 ## Pi 3B+ No-Boot Recovery Checklist
 
-If `100.95.196.115` drops off Tailscale after adding the Voice Kit HAT and the Pi 3B+ shows only the red power LED with no HDMI output, do not assume the Pi is burned immediately. Diagnose in this order:
+If `max@pi3` drops off Tailscale after adding the Voice Kit HAT and the Pi 3B+ shows only the red power LED with no HDMI output, do not assume the Pi is burned immediately. Diagnose in this order:
 
 1. Power off and unplug everything.
 2. Remove the AIY Voice Kit HAT/Bonnet completely from the 40-pin header.

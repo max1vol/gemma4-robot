@@ -6,3 +6,6 @@ out/
 .env.*
 !.env.example
 pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK/
+agent-harness/target/
+bin/gemma-agent-harness
+.cargo-container/

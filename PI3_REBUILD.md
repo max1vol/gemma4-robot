@@ -1,10 +1,10 @@
 # Raspberry Pi 3 Rebuild Runbook
 
 This project uses a Raspberry Pi 3 reachable as `max@pi3` over Tailscale. The
-Pi drives the Google AIY Voice Kit HAT locally and uses OpenAI APIs for voice
-chat.
+Pi drives the Google AIY Voice Kit HAT locally and uses Google-hosted Gemma for
+the voice agent.
 
-Do not commit secrets. Keep `OPENAI_API_KEY` only in a local file on the Pi.
+Do not commit secrets. Keep `GEMINI_API_KEY` only in a local file on the Pi.
 
 ## 1. Install Raspberry Pi OS
 
@@ -94,21 +94,32 @@ tailscale ssh max@pi3 'mkdir -p ~/gemma4-robot'
 rsync -av --exclude .git --exclude .env --exclude out ./ max@pi3:~/gemma4-robot/
 ```
 
-## 6. Add The OpenAI API Key
+## 6. Add The Gemini API Key
 
 Create the Pi-local env file:
 
 ```sh
 umask 077
 cat > ~/gemma4-robot/.env <<'EOF'
-OPENAI_API_KEY=replace-this-on-the-pi
+GEMINI_API_KEY=replace-this-on-the-pi
 EOF
 chmod 600 ~/gemma4-robot/.env
 ```
 
 This file is intentionally ignored by git.
 
-## 7. Install Boot Services
+## 7. Build The Rust Agent On The Mac
+
+Do not compile the Rust agent on the Pi. Build the Linux arm64 binary on the Mac
+with Apple container:
+
+```sh
+scripts/build_agent_harness_container.sh
+```
+
+Then sync `bin/gemma-agent-harness` to the Pi along with the repo files.
+
+## 8. Install Boot Services
 
 Allow the kiosk X session to be launched from SSH/systemd:
 
@@ -135,37 +146,40 @@ journalctl -u gemma-voice-bot.service -u gemma-voice-kiosk.service -n 100 --no-p
 
 These services auto-start after reboot.
 
-## 8. Manual Voice Bot Start
+## 9. Manual Voice Agent Start
 
 ```sh
-nohup ~/gemma4-robot/scripts/voice-kit/openai_voice_chat_bot.py \
+nohup ~/gemma4-robot/bin/gemma-agent-harness \
+  --env-file ~/gemma4-robot/.env \
+  --model gemma-4-31b-it \
+  voice-bot \
   --playback-device plughw:1,0 \
   --capture-device plughw:1,0 \
-  > /tmp/openai_voice_chat_bot.log 2>&1 &
-echo $! > /tmp/openai_voice_chat_bot.pid
+  > /tmp/gemma_voice_agent.log 2>&1 &
+echo $! > /tmp/gemma_voice_agent.pid
 ```
 
 Check it:
 
 ```sh
-tail -80 /tmp/openai_voice_chat_bot.log
-ps -fp "$(cat /tmp/openai_voice_chat_bot.pid)"
+tail -80 /tmp/gemma_voice_agent.log
+ps -fp "$(cat /tmp/gemma_voice_agent.pid)"
 ```
 
 Interaction model:
 
 - hold the AIY HAT button to record
-- release to transcribe, send to `gpt-5.5`, synthesize speech, and play audio
+- release to send the recorded audio to `gemma-4-31b-it`
 - tap shorter than `0.35s` to reset the conversation
-- boot is silent; the bot does not speak until a recorded user turn is processed
+- boot is silent; model output is written to the display status JSON
 
-The bot writes live display state to:
+The agent writes live display state to:
 
 ```text
 ~/gemma4-robot/kiosk/status.json
 ```
 
-## 9. Manual HDMI Kiosk Start
+## 10. Manual HDMI Kiosk Start
 
 Check HDMI mode:
 
@@ -194,7 +208,7 @@ The kiosk serves a local page at `http://127.0.0.1:8765/` and displays:
 - latest transcribed user input
 - latest model output
 
-## 10. Stop Or Restart
+## 11. Stop Or Restart
 
 With systemd:
 
@@ -206,7 +220,7 @@ sudo systemctl stop gemma-voice-bot.service gemma-voice-kiosk.service
 If started manually, stop the bot:
 
 ```sh
-kill "$(cat /tmp/openai_voice_chat_bot.pid)"
+kill "$(cat /tmp/gemma_voice_agent.pid)"
 ```
 
 Stop the kiosk:

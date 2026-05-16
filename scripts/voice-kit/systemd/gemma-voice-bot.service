@@ -1,5 +1,5 @@
 [Unit]
-Description=Gemma OpenAI Voice Bot
+Description=Gemma Rust Voice Agent
 Wants=network-online.target sound.target
 After=network-online.target sound.target
 
@@ -9,7 +9,7 @@ User=max
 Group=max
 WorkingDirectory=/home/max/gemma4-robot
 Environment=HOME=/home/max
-ExecStart=/home/max/gemma4-robot/scripts/voice-kit/openai_voice_chat_bot.py --playback-device plughw:1,0 --capture-device plughw:1,0 --startup-greeting=
+ExecStart=/home/max/gemma4-robot/bin/gemma-agent-harness --env-file /home/max/gemma4-robot/.env --model gemma-4-31b-it voice-bot --playback-device plughw:1,0 --capture-device plughw:1,0 --startup-greeting=
 Restart=always
 RestartSec=5
 

@@ -614,3 +614,37 @@ End-to-end NEON reference path:
     - This commit is instrumentation, not a new kernel-speed claim. It preserves the current end-to-end runtime and gives a lower-noise way to test A53 pointwise/depthwise microkernel changes.
     - The op-level results show why blind full-model pointwise changes were hard to judge: several 4-thread samples are slower than 3-thread samples under current Pi load, while fused stride/depthwise ops scale differently from large pointwise ops.
     - Next implementation work should use `bench-op` to compare a true A53 assembly or carefully constrained intrinsics pointwise microkernel against source op `204` and a few smaller landmarker pointwise ops before touching the integrated path.
+
+- 2026-05-16 post-`bench-op` kernel selection pass:
+  - Refreshed the current Pi profile with the retained runtime:
+    - `tailscale ssh max@pi3 'cd ~/gemma4-robot && rm -rf /tmp/pose-det-profile-now /tmp/pose-lm-profile-now && mkdir -p /tmp/pose-det-profile-now /tmp/pose-lm-profile-now && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-profile-now 4 1 out/pose_runtime_test_detector/ref && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-profile-now 4 1 out/pose_runtime_test_noseg/ref && ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-for-pose-profile-now-track-t4.json 4 8'`
+    - Detector profile totals: `CONV2D 278.759 ms`, `DEPTHWISE 166.745 ms`, `ADD 2.109 ms`, `RESIZE_BILINEAR 5.573 ms`, `PAD 5.017 ms`.
+    - Detector top ops: `053 DEPTHWISE 27.113 ms`, `204 CONV2D 26.307 ms`, `029 DEPTHWISE 21.689 ms`, `042 DEPTHWISE 14.499 ms`, `119 DEPTHWISE 13.576 ms`, `014 CONV2D 13.177 ms`.
+    - Landmarker profile totals: `CONV2D 174.804 ms`, `DEPTHWISE 154.485 ms`, `ADD 3.741 ms`, `RESIZE_BILINEAR 3.944 ms`.
+    - Landmarker top ops: `058 DEPTHWISE 28.218 ms`, `003 CONV2D 25.298 ms`, `023 DEPTHWISE 18.307 ms`, `006 DEPTHWISE 18.248 ms`, `032 DEPTHWISE 16.775 ms`, `049 DEPTHWISE 14.293 ms`, `029 CONV2D 14.281 ms`.
+    - Tracked 4-core sanity: acquisition `296.682 ms`; sample `9.357 ms`; landmarker `141.748 ms`; tracked frame `152.756 ms`; `6.546 FPS`.
+  - Failed depthwise idea:
+    - Tried a 4-adjacent-pixel `3x3 stride1 SAME` depthwise interior kernel to reuse weights across four neighboring output columns.
+    - Local tensor diffs stayed unchanged, but Pi op results were mixed and not strong enough to retain.
+    - Pi `bench-op` after the quad path, `reps=30`, `warmup=3`:
+      - detector `053`: 3 threads `24.362 ms`, 4 threads `13.333 ms`.
+      - detector `029`: 3 threads `7.954 ms`, 4 threads `7.859 ms`.
+      - landmarker `058`: 3 threads `9.210 ms`, 4 threads `8.394 ms`.
+      - landmarker `032`: 3 threads `6.126 ms`, 4 threads `6.146 ms`.
+    - The tracked 4-core run was essentially flat at `146.644 ms` / `6.819 FPS`, while landmarker `058` regressed against the prior `6.850 ms` checkpoint. Reverted the quad path.
+  - XNNPACK A53 6x8 assembly calibration:
+    - Built an experimental binary that called XNNPACK's generated Cortex-A53 `f32-gemm-6x8-minmax` assembly only for standalone packed `p_count=6, oc_count=8` pointwise tiles. This was a calibration experiment only; the retained/default runtime remains XNNPACK-free.
+    - Build command:
+      - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -DPOSE_USE_XNNPACK_A53_GEMM -std=c11 -Wall -Wextra -I out/pose_runtime_data -I research/xnnpack/XNNPACK scripts/pose_neon_runtime.c research/xnnpack/XNNPACK/src/f32-gemm/gen/f32-gemm-6x8-minmax-asm-aarch64-neonfma-cortex-a53-prfm.S -o out/pose_neon_runtime_aarch64_xnn6x8_exp -lm -pthread'`
+    - Correctness stayed in the same range against raw tensor references.
+    - Pi `bench-op` result for detector `204` improved materially:
+      - 3 threads: `13.119 ms`, `3.305 GMAC/s`, `6.609 GFLOP/s`.
+      - 4 threads: `16.607 ms`, `2.611 GMAC/s`, `5.221 GFLOP/s`.
+    - Landmarker `012` was roughly flat: 3 threads `2.990 ms`, 4 threads `2.896 ms`.
+    - Tracked 4-core frames stayed roughly flat at `147.558 ms` / `6.777 FPS` because the hot tracked path still spends most pointwise time in fused residual `CONV2D -> ADD` tiles that the experiment did not replace.
+    - Restored and recopied the default XNNPACK-free binary afterward:
+      - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o out/pose_neon_runtime_aarch64_ofast -lm -pthread'`
+      - Default 4-core tracked sanity after restore: acquisition `330.347 ms`; sample `10.419 ms`; landmarker `134.875 ms`; tracked frame `147.004 ms`; `6.803 FPS`.
+  - Interpretation:
+    - Do not keep exploring C-level depthwise adjacent-column variants unless a very specific hot op is isolated first; the 4-column variant did not translate into end-to-end gain.
+    - The true next implementation target is now clearer: reimplement the XNNPACK-style A53 6x8 pointwise schedule inside our custom runtime, then apply it to both standalone and fused `1x1 CONV2D -> ADD` tiles. Detector `204` proves the schedule can be faster; tracked-frame gains require the fused-add variant too.

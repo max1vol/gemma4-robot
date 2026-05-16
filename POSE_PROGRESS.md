@@ -1161,3 +1161,42 @@ End-to-end NEON reference path:
     - 4 workers: `120.338 -> 121.474 ms`.
     - Exported JSON stayed exact (`0.0` max abs over 355 numeric fields), but performance regressed/flattened.
   - Reverted. The retained quad-all dispatch remains better for the integrated tracked path.
+
+- 2026-05-16 rejected post-quad follow-up experiments:
+  - Current retained Pi baseline refresh:
+    - Command: `ssh -o BatchMode=yes -o ConnectTimeout=5 max@192.168.1.174 'cd ~/gemma4-robot && for t in 1 2 3 4; do ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-track-baseline-refresh-t${t}.json $t 16 0; done'`.
+    - Tracked frame averages: 1 worker `255.864 ms` / `3.908 FPS`; 2 workers `151.876 ms` / `6.584 FPS`; 3 workers `122.911 ms` / `8.136 FPS`; 4 workers `122.577 ms` / `8.158 FPS`.
+    - Pi status check: governor `ondemand`, current frequency `1400000`, temperature `38.6 C`, `vcgencmd get_throttled=0x50005`. Treat small A/B differences cautiously because the board has under-voltage/throttle history.
+  - Rejected packed pointwise `mr=4` assembly tail routing:
+    - Tried routing standalone and fused packed pointwise tiles with `p_count == 4` through the existing local A53 `6x8` assembly kernel using its `mr` parameter.
+    - Raw tensor checks on Pi stayed in the usual range: detector tensor 441 `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.36e-5`.
+    - Same-run op A/B showed the path was not viable:
+      - Landmarker `012`: `3.076 -> 3.401 ms`; `026`: `0.764 -> 1.103 ms`; heatmap head `234`: `1.362 -> 2.723 ms`; small 4x4 head `246`: `0.212 -> 0.314 ms`.
+      - Fused residual pointwise improved only slightly in that run (`116->117`: `1.131 -> 1.104 ms`, `126->127`: `1.121 -> 1.080 ms`), not enough to offset the regressions.
+      - Detector `014` and `204` were slight improvements, but detector acquisition is not the tracked-frame hot path.
+    - Reverted. Do not add a separate 4x8/1x8 assembly path unless a more specific benchmark shows a real tail bottleneck; the existing C tail paths are better for several current shapes.
+  - Rejected three-output first RGB stride-2 conv:
+    - Extended the retained two-output first-conv pair idea to compute three adjacent interior output pixels at once for fused `PAD -> 3x3 stride-2 RGB -> 24 channels`.
+    - Raw tensor checks stayed unchanged, but isolated first-conv timing regressed:
+      - Landmarker `003 PAD+CONV2D`: 2 workers `8.418 -> 9.296 ms`, 3 workers `5.193 -> 6.565 ms`, 4 workers `5.118 -> 5.150 ms`.
+      - Detector `003 PAD+CONV2D`: 2 workers `5.903 -> 7.364 ms`, 3 workers `4.186 -> 5.944 ms`, 4 workers `3.264 -> 5.068 ms`.
+    - Reverted. The retained two-output pair kernel is the better register-pressure point for this first-conv shape.
+  - Rejected three-column `3x3 stride1 SAME` depthwise:
+    - Tried a three-adjacent-column depthwise kernel as a lower-register-pressure alternative to the previously rejected 3x3 quad-column path.
+    - Local and Pi raw tensor checks stayed in the usual range.
+    - Op-level timings were mixed: some small/mid ops improved, but important 4-worker ops regressed, including landmarker `058` (`3.651 -> 5.951 ms`) and detector `006` (`2.683 -> 3.293 ms`).
+    - Integrated tracked A/B for the ungated variant, `reps=32`, exact JSON:
+      - 2 workers: `147.746 -> 146.078 ms`.
+      - 3 workers: `123.829 -> 122.986 ms`.
+      - 4 workers: `118.052 -> 120.490 ms` (regression).
+    - Tried gating the triple path to workers `< 4`, then to only `2` workers. Longer two-repeat A/B was still noisy and not reliably positive:
+      - 2-worker-only gate repeat 1: 2 workers `146.643 -> 146.818 ms`, 3 workers `122.481 -> 122.014 ms`, 4 workers `118.405 -> 120.024 ms`.
+      - 2-worker-only gate repeat 2: 2 workers `147.442 -> 146.567 ms`, 3 workers `119.852 -> 121.214 ms`, 4 workers `118.615 -> 119.764 ms`.
+    - Reverted. Do not keep worker-count-specific depthwise variants without repeated wins in the modes they affect and no code-layout regression in the modes they should not affect.
+  - Rejected Linux thread-affinity experiment:
+    - Tried pinning the main runtime thread to core 0 and pool workers to cores 1..N on Linux, with `POSE_PIN_THREADS=0` as an escape hatch.
+    - Raw tensor checks stayed unchanged and JSON stayed exact.
+    - Two-repeat tracked A/B was not stable:
+      - Repeat 1: 2 workers `147.851 -> 147.524 ms`, 3 workers `121.499 -> 119.687 ms`, 4 workers `119.101 -> 120.824 ms`.
+      - Repeat 2: 2 workers `147.333 -> 148.302 ms`, 3 workers `147.717 -> 121.013 ms` (baseline outlier), 4 workers `120.353 -> 121.731 ms`.
+    - Reverted. Plain `taskset` can sometimes improve a run, but runtime-internal affinity was not a reliable integrated model improvement on this Pi under current power/throttle conditions.

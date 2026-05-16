@@ -1,7 +1,7 @@
 # Gemma4 Robot
 
 Gemma4 Robot is a hardware project for the future of learning and healthy
-habits. Its primary feature is a paper-based science and mathematics coach: the
+habits. Its primary feature is a paper-based Science and Mathematics coach: the
 system creates worksheets, writes them on paper with a pen plotter, reads the
 student's handwritten work with a camera, uses Gemma 4 to grade the reasoning,
 and writes feedback directly back onto the same paper. Its second feature is an

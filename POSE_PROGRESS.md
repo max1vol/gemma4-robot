@@ -1200,3 +1200,225 @@ End-to-end NEON reference path:
       - Repeat 1: 2 workers `147.851 -> 147.524 ms`, 3 workers `121.499 -> 119.687 ms`, 4 workers `119.101 -> 120.824 ms`.
       - Repeat 2: 2 workers `147.333 -> 148.302 ms`, 3 workers `147.717 -> 121.013 ms` (baseline outlier), 4 workers `120.353 -> 121.731 ms`.
     - Reverted. Plain `taskset` can sometimes improve a run, but runtime-internal affinity was not a reliable integrated model improvement on this Pi under current power/throttle conditions.
+
+- 2026-05-16 rejected gated first RGB stride-2 common-pad specialization:
+  - Motivation:
+    - Tested a narrower version of the first-conv border/interior split after the earlier rejected three-output first-conv experiment. This variant kept the retained pair/single math, hoisted the common `top=1`, `left=1`, `in_w == out_w * 2` padding case, and gated the new path to `rt->threads == 2` only.
+    - Fresh-context review warned that this is another marginal first-conv gate and should be retained only with a clear repeated 2-worker tracked win and no 3/4-worker regression.
+  - Build and correctness:
+    - Local checks passed:
+      - `git diff --check`
+      - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_rgbborder_t2_local -lm -pthread`
+      - `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_rgbborder_t2`
+    - Pi raw tensor checks stayed in the usual range after copying the candidate:
+      - Detector 4-thread single rep: average `292.841 ms`; tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`.
+      - Landmarker 4-thread single rep: average `123.475 ms`; tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+  - Isolated first-conv op `003 PAD+CONV2D`, old default vs gated candidate, `bench-op`, `reps=50`, `warmup=6`:
+    - Landmarker:
+      - 2 workers: `7.788 -> 7.250 ms`.
+      - 3 workers: `5.755 -> 5.670 ms` (fast path gated off; treat as layout/noise).
+      - 4 workers: `5.382 -> 5.376 ms` (fast path gated off; treat as layout/noise).
+    - Detector:
+      - 2 workers: `6.078 -> 5.648 ms`.
+      - 3 workers: `4.577 -> 4.548 ms` (fast path gated off; treat as layout/noise).
+      - 4 workers: `4.365 -> 3.981 ms` (fast path gated off; treat as layout/noise).
+  - Integrated tracked A/B on `out/human-for-pose.rgb`, `514x994`, `reps=48`, `refresh_interval=0`, old default vs gated candidate:
+    - Repeat 1:
+      - 2 workers: `147.121 -> 147.375 ms` tracked frame, regression.
+      - 3 workers: `121.365 -> 120.919 ms`.
+      - 4 workers: `119.471 -> 118.260 ms`.
+    - Repeat 2:
+      - 2 workers: `147.536 -> 146.815 ms`, improvement.
+      - 3 workers: `123.786 -> 120.988 ms`.
+      - 4 workers: `120.916 -> 119.661 ms`.
+    - Exported tracked JSON matched exactly in every repeat and worker mode: `0.0` max abs over exported numeric fields.
+  - Decision:
+    - Rejected and reverted. Correctness was fine, but the only worker mode intentionally affected by the gate did not improve repeatedly. The 3/4-worker wins are not a defensible keep signal because the fast path is disabled there and the Pi has known noise/under-voltage history (`get_throttled=0x50005` in the current baseline refresh).
+    - Next retained work should stop adding first-conv/depthwise worker-count gates and return to the XNNPACK-inspired pointwise path: packed output-channel blocks, A53 6x8/4x8/1x8 kernels, fused min/max, and persistent worker scheduling.
+
+- 2026-05-16 rejected fused pointwise-add in-place spill removal:
+  - Motivation:
+    - The retained A53 6x8 pointwise assembly path still handles fused `1x1 CONV2D -> ADD` full tiles by computing GEMM into a 48-float stack tile, then adding the residual and applying activation in a separate NEON loop.
+    - Tried a low-risk intermediate step before writing a true add-store assembly kernel: call the existing GEMM assembly directly into the final output tensor with no activation, then add residual in place and apply activation. This preserves the same post-GEMM arithmetic but replaces stack spill/read with output write/read.
+  - Build and correctness:
+    - Local checks passed:
+      - `git diff --check`
+      - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_fusedadd_inplace_local -lm -pthread`
+      - Local raw tensor diffs stayed in the usual range: detector tensor 441 `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+    - Cross-built with `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_fusedadd_inplace`.
+    - Pi raw tensor checks stayed in the usual range:
+      - Detector 4-thread single rep: `297.045 ms`; tensor 441 `5.264e-4`, tensor 429 `3.357e-4`.
+      - Landmarker 4-thread single rep: `122.801 ms`; tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+  - Targeted `bench-op`, old default vs in-place candidate, `reps=60`, `warmup=8`:
+    - Detector fused `123->124`: 2 workers `5.458 -> 5.616 ms`; 3 workers `4.316 -> 3.676 ms`; 4 workers `3.323 -> 4.285 ms`.
+    - Detector fused `135->136`: 2 workers `5.347 -> 5.502 ms`; 3 workers `3.779 -> 3.876 ms`; 4 workers `4.217 -> 3.804 ms`.
+    - Detector standalone control `204`: 2 workers `21.225 -> 20.474 ms`; 3 workers `12.764 -> 12.405 ms`; 4 workers `17.147 -> 17.847 ms`.
+    - Landmarker fused `116->117`: 2 workers `1.853 -> 1.815 ms`; 3 workers `1.296 -> 1.603 ms`; 4 workers `1.095 -> 1.471 ms`.
+    - Landmarker fused `126->127`: 2 workers `1.916 -> 1.815 ms`; 3 workers `1.344 -> 1.852 ms`; 4 workers `1.145 -> 1.085 ms`.
+    - Landmarker standalone control `012`: 2 workers `3.492 -> 3.283 ms`; 3 workers `2.772 -> 3.249 ms`; 4 workers `3.731 -> 3.592 ms`.
+  - Integrated tracked A/B on `out/human-for-pose.rgb`, `514x994`, `reps=32`, `refresh_interval=0`, old default vs in-place candidate:
+    - 2 workers: `146.904 -> 148.992 ms`, regression.
+    - 3 workers: `120.783 -> 120.800 ms`, flat.
+    - 4 workers: `119.497 -> 120.440 ms`, regression.
+    - Exported tracked JSON matched exactly in every mode: `0.0` max abs over exported numeric fields.
+  - Decision:
+    - Rejected and reverted. Writing the intermediate into the output buffer did not improve the integrated tracked path and made the important landmarker fused ops worse at 3/4 workers.
+    - The next fused-add pointwise attempt should be a true A53 6x8 assembly variant that loads residual, adds it before min/max activation, and stores once. The output-buffer workaround adds cache traffic without removing the second pass.
+
+- 2026-05-16 rejected true fused pointwise-add in the 6x8 assembly store path:
+  - Motivation:
+    - Implemented the next direct version after the in-place workaround failed: extended the local 6x8 A53 assembly microkernel params with an optional residual pointer and residual row stride, loaded six residual rows in the assembly store path, added them to the 6x8 accumulators before min/max activation, and stored once.
+    - Standalone pointwise passed `NULL` residual params; fused `1x1 CONV2D -> ADD` full tiles passed the residual base and `out_c * sizeof(float)` stride.
+  - Build and correctness:
+    - Local checks passed:
+      - `git diff --check`
+      - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_asm_add_local -lm -pthread`
+      - `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_asmadd`
+    - Pi raw tensor checks stayed in the usual range:
+      - Detector 4-thread single rep: `292.760 ms`; tensor 441 `5.264e-4`, tensor 429 `3.357e-4`.
+      - Landmarker 4-thread single rep: `125.454 ms`; tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+  - Targeted `bench-op`, old default vs asm-add candidate, `reps=60`, `warmup=8`:
+    - Detector fused `123->124`: 2 workers `5.525 -> 5.546 ms`; 3 workers `3.688 -> 4.142 ms`; 4 workers `4.526 -> 3.359 ms`.
+    - Detector fused `135->136`: 2 workers `5.533 -> 5.290 ms`; 3 workers `3.985 -> 4.407 ms`; 4 workers `3.675 -> 3.336 ms`.
+    - Detector standalone control `204`: 2 workers `20.086 -> 21.734 ms`; 3 workers `13.232 -> 12.142 ms`; 4 workers `17.298 -> 16.757 ms`.
+    - Landmarker fused `116->117`: 2 workers `1.980 -> 2.105 ms`; 3 workers `1.314 -> 1.309 ms`; 4 workers `1.370 -> 1.077 ms`.
+    - Landmarker fused `126->127`: 2 workers `1.842 -> 1.926 ms`; 3 workers `1.298 -> 1.322 ms`; 4 workers `1.354 -> 1.080 ms`.
+    - Landmarker standalone control `012`: 2 workers `3.537 -> 3.585 ms`; 3 workers `2.791 -> 2.811 ms`; 4 workers `3.793 -> 3.706 ms`.
+  - Integrated tracked A/B on `out/human-for-pose.rgb`, `514x994`, `reps=48`, `refresh_interval=0`, old default vs asm-add candidate:
+    - Repeat 1:
+      - 2 workers: `147.441 -> 149.062 ms`, regression.
+      - 3 workers: `121.572 -> 121.913 ms`, regression.
+      - 4 workers: `118.559 -> 118.271 ms`, slight improvement.
+    - Repeat 2:
+      - 2 workers: `147.661 -> 148.031 ms`, regression.
+      - 3 workers: `121.247 -> 120.641 ms`, improvement.
+      - 4 workers: `120.613 -> 121.421 ms`, regression.
+    - Exported tracked JSON matched exactly in every repeat and worker mode: `0.0` max abs over exported numeric fields.
+  - Decision:
+    - Rejected and reverted. The true add-store assembly path was correct but not a reliable integrated improvement across the required 2/3/4 worker modes. It likely front-loads residual loads/adds in a way that does not beat the existing stack-tile plus NEON post-pass on this Cortex-A53.
+    - Do not reintroduce this as a worker-count-specific gate. If fused-add is revisited, it needs a better scheduled dedicated assembly kernel and should preserve standalone pointwise performance without a branch in the common non-add path.
+
+- 2026-05-16 rejected proper A53 `4x8` pointwise tail microkernel:
+  - Motivation:
+    - XNNPACK's Cortex-A53 config includes a `4x8` FP32 GEMM min/max microkernel. Previous routing of `p_count == 4` tiles through the retained `6x8` assembly with `mr=4` regressed important ops, so this tested the correct 4-row kernel instead.
+    - Fresh-context review called this a valid bounded calibration, but warned the expected payoff is small because `p_count==4` tail work is only a small fraction of pointwise MACs and the existing path is already NEON C.
+  - Implementation:
+    - Temporarily vendored `research/xnnpack/XNNPACK/src/f32-gemm/gen/f32-gemm-4x8-minmax-asm-aarch64-neonfma-cortex-a53-prfm.S` as a local renamed `scripts/pose_a53_pw4x8.S`, stripped of XNNPACK headers like the retained `6x8` file.
+    - Added guarded `POSE_USE_A53_PW4X8_ASM` calls for exact `p_count == 4`, `oc_count == 8` standalone and fused-add pointwise tiles.
+    - Cross-build helper was temporarily changed to compile both local assembly files.
+  - Build and correctness:
+    - Local checks passed:
+      - `git diff --check`
+      - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_pw4_local -lm -pthread`
+      - `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_pw4x8`
+    - Pi raw tensor checks stayed in the usual range:
+      - Detector 4-thread single rep: `256.156 ms`; tensor 441 `5.264e-4`, tensor 429 `3.357e-4`.
+      - Landmarker 4-thread single rep: noisy/high `169.890 ms`; tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+  - Targeted `bench-op`, old default vs 4x8 candidate, `reps=50`, `warmup=6`:
+    - Landmarker standalone `012`: 2 workers `3.584 -> 3.133 ms`; 3 workers `2.780 -> 3.715 ms`; 4 workers `2.954 -> 2.939 ms`.
+    - Landmarker standalone `026`: 2 workers `1.029 -> 0.943 ms`; 3 workers `0.693 -> 0.829 ms`; 4 workers `0.735 -> 1.051 ms`.
+    - Landmarker head `234`: 2 workers `2.195 -> 2.201 ms`; 3 workers `1.656 -> 2.100 ms`; 4 workers `1.615 -> 1.390 ms`.
+    - Landmarker low-res `246`: 2 workers `0.308 -> 0.243 ms`; 3 workers `0.238 -> 0.217 ms`; 4 workers `0.221 -> 0.181 ms`.
+    - Landmarker fused `116->117`: 2 workers `1.838 -> 1.979 ms`; 3 workers `1.308 -> 1.698 ms`; 4 workers `1.150 -> 1.123 ms`.
+    - Landmarker fused `126->127`: 2 workers `2.094 -> 1.810 ms`; 3 workers `1.316 -> 2.009 ms`; 4 workers `1.120 -> 1.399 ms`.
+    - Detector standalone `014`: 2 workers `6.674 -> 6.423 ms`; 3 workers `5.103 -> 4.735 ms`; 4 workers `4.778 -> 4.947 ms`.
+    - Detector standalone `204`: 2 workers `21.133 -> 20.513 ms`; 3 workers `13.813 -> 11.985 ms`; 4 workers `17.440 -> 17.301 ms`.
+    - Detector fused `123->124`: 2 workers `5.429 -> 5.420 ms`; 3 workers `4.259 -> 4.259 ms`; 4 workers `4.425 -> 3.252 ms`.
+    - Detector fused `135->136`: 2 workers `5.503 -> 5.569 ms`; 3 workers `3.762 -> 3.660 ms`; 4 workers `3.176 -> 3.619 ms`.
+  - Integrated tracked A/B on `out/human-for-pose.rgb`, `514x994`, `reps=48`, `refresh_interval=0`, old default vs 4x8 candidate:
+    - Repeat 1:
+      - 2 workers: `148.040 -> 145.934 ms`, improvement.
+      - 3 workers: `120.846 -> 122.864 ms`, regression.
+      - 4 workers: `118.103 -> 118.867 ms`, regression.
+    - Repeat 2:
+      - 2 workers: `146.934 -> 145.888 ms`, improvement.
+      - 3 workers: `122.115 -> 121.551 ms`, improvement.
+      - 4 workers: `118.416 -> 119.726 ms`, regression.
+    - Exported tracked JSON matched exactly in every repeat and worker mode: `0.0` max abs over exported numeric fields.
+  - Decision:
+    - Rejected and reverted. The proper 4x8 kernel improved 2-worker tracked runs but regressed 4-worker tracked runs twice, and the 3-worker result was mixed. The project requires 2/3/4-core NEON modes, so this should not be retained as a default path.
+    - Do not continue tail-kernel work without new model-shape evidence. The next higher-leverage candidate is scheduling/grain control for the persistent worker pool or a specifically isolated hot depthwise op, not another pointwise tail variant.
+
+- 2026-05-16 rejected worker-count scheduling micro-tuning:
+  - Motivation:
+    - After several kernel-level candidates were correct but not retained, tested whether some 4-worker slowdowns were scheduling/grain effects. Measured representative hot ops at 1/2/3/4 workers on the retained binary before editing.
+  - Baseline thread sweep highlights, retained binary, `bench-op`, `reps=40`, `warmup=5`:
+    - Landmarker:
+      - `032 DEPTHWISE`: 1 `16.309 ms`, 2 `8.605 ms`, 3 `6.567 ms`, 4 `6.777 ms`.
+      - `049 PAD+DEPTHWISE`: 1 `17.784 ms`, 2 `9.407 ms`, 3 `7.273 ms`, 4 `7.378 ms`.
+      - `058 DEPTHWISE`: 1 `11.152 ms`, 2 `6.021 ms`, 3 `5.334 ms`, 4 `4.983 ms`.
+      - `116->117 CONV2D+ADD`: 1 `3.429 ms`, 2 `1.828 ms`, 3 `1.414 ms`, 4 `1.086 ms`.
+      - `126->127 CONV2D+ADD`: 1 `3.303 ms`, 2 `1.830 ms`, 3 `1.296 ms`, 4 `1.069 ms`.
+      - `234 CONV2D`: 1 `4.112 ms`, 2 `2.210 ms`, 3 `1.842 ms`, 4 `1.365 ms`.
+    - Detector:
+      - `204 CONV2D`: 1 `30.353 ms`, 2 `19.510 ms`, 3 `12.535 ms`, 4 `17.957 ms`.
+      - `053 DEPTHWISE`: 1 `16.083 ms`, 2 `9.025 ms`, 3 `7.680 ms`, 4 `6.600 ms`.
+      - `123->124 CONV2D+ADD`: 1 `10.146 ms`, 2 `5.243 ms`, 3 `3.759 ms`, 4 `3.275 ms`.
+  - First scheduling candidate:
+    - For requested 4-worker mode, forced landmarker source ops `032` and `049`, plus detector source op `204`, to use 3 active threads. Added `POSE_SCHED_TUNING=0` as an escape hatch.
+    - Same-binary on/off checks showed the landmarker part was wrong:
+      - Landmarker `032`: tuning on `6.618 ms`, off `6.231 ms`.
+      - Landmarker `049`: tuning on `7.529 ms`, off `7.197 ms`.
+      - Landmarker `058` control also slightly worse on `4.789 ms`, off `4.669 ms`.
+      - Detector `204` improved strongly: on `12.116 ms`, off `17.758 ms`.
+    - Narrowed candidate to detector `204` only.
+  - Narrow detector-only candidate:
+    - Local and cross-build checks passed:
+      - `git diff --check`
+      - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_sched_detector204_local -lm -pthread`
+      - `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_sched204`
+    - Pi raw tensor correctness stayed in the usual range: detector tensor 441 `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+    - Detector `204` old default vs narrowed candidate, `bench-op`, 4 workers, `reps=80`, `warmup=10`:
+      - Repeat 1: `17.361 -> 12.499 ms`.
+      - Repeat 2: `17.250 -> 12.613 ms`.
+    - Full detector old default vs narrowed candidate, 4 workers, `reps=5`:
+      - Repeat 1: `233.470 -> 234.593 ms`.
+      - Repeat 2: `241.281 -> 247.319 ms`.
+      - Raw outputs stayed in the usual range.
+    - Tracked smoke on `out/human-for-pose.rgb`, `514x994`, `reps=32`, `refresh_interval=0`, old default vs narrowed candidate:
+      - 2 workers: `148.546 -> 148.598 ms`.
+      - 3 workers: `124.036 -> 123.628 ms`.
+      - 4 workers: `119.602 -> 119.961 ms`.
+      - Exported tracked JSON matched exactly for all modes: `0.0`.
+  - Decision:
+    - Rejected and reverted. The single-op detector `204` gain did not translate into full-detector improvement and did not help the tracked path. Do not keep scheduler special cases without model-level improvement.
+    - The next useful target should be a specifically isolated hot depthwise kernel or a more principled work scheduler with lower synchronization cost, not fixed per-op worker-count overrides.
+
+- 2026-05-16 rejected fused `PAD->DEPTHWISE` branch-hoist helper split:
+  - Motivation:
+    - The fused `PAD->DEPTHWISE` implementation computed whether each output pixel was interior, but branched on that `interior` flag inside every channel block. For stride-2 padded depthwise layers like landmarker `049`, most output pixels are interior, so the branch can be hoisted outside the channel loop.
+  - Implementation:
+    - Added separate `depthwise_valid_pixel` and `depthwise_checked_from_pad_pixel` helpers.
+    - Rewrote `depthwise_from_padded_input_rows` to choose valid vs checked once per output pixel, then run a branch-free channel loop for the chosen path.
+  - Build and correctness:
+    - Local checks passed:
+      - `git diff --check`
+      - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_dwpad_branch_local -lm -pthread`
+      - `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_dwpadbranch`
+    - Pi raw tensor checks stayed in the usual range:
+      - Detector 4-thread single rep: `300.544 ms`; tensor 441 `5.264e-4`, tensor 429 `3.357e-4`.
+      - Landmarker 4-thread single rep: `120.921 ms`; tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+  - Targeted `bench-op`, old default vs branch-hoist candidate, `reps=60`, `warmup=8`:
+    - Landmarker:
+      - `023 PAD+DEPTHWISE`: 2 workers `6.066 -> 5.339 ms`; 3 workers `4.101 -> 4.146 ms`; 4 workers `3.844 -> 3.975 ms`.
+      - `049 PAD+DEPTHWISE`: 2 workers `9.753 -> 9.539 ms`; 3 workers `7.455 -> 7.822 ms`; 4 workers `7.015 -> 7.322 ms`.
+      - `075 PAD+DEPTHWISE`: 2 workers `1.600 -> 1.545 ms`; 3 workers `1.742 -> 1.222 ms`; 4 workers `1.080 -> 1.301 ms`.
+      - `140 PAD+DEPTHWISE`: 2 workers `1.974 -> 1.958 ms`; 3 workers `2.256 -> 1.578 ms`; 4 workers `1.223 -> 2.236 ms`.
+    - Detector:
+      - `018 PAD+DEPTHWISE`: 2 workers `9.055 -> 8.300 ms`; 3 workers `7.034 -> 6.493 ms`; 4 workers `6.069 -> 5.633 ms`.
+      - `042 PAD+DEPTHWISE`: 2 workers `11.024 -> 10.898 ms`; 3 workers `9.373 -> 9.043 ms`; 4 workers `8.234 -> 8.328 ms`.
+      - `073 PAD+DEPTHWISE`: 2 workers `2.323 -> 2.232 ms`; 3 workers `1.822 -> 1.753 ms`; 4 workers `1.603 -> 1.803 ms`.
+      - `151 PAD+DEPTHWISE`: 2 workers `4.512 -> 4.893 ms`; 3 workers `3.477 -> 3.630 ms`; 4 workers `3.241 -> 3.569 ms`.
+  - Integrated tracked A/B on `out/human-for-pose.rgb`, `514x994`, `reps=48`, `refresh_interval=0`, old default vs branch-hoist candidate:
+    - Repeat 1:
+      - 2 workers: `147.942 -> 146.763 ms`, improvement.
+      - 3 workers: `123.756 -> 122.979 ms`, improvement.
+      - 4 workers: `119.063 -> 120.237 ms`, regression.
+    - Repeat 2:
+      - 2 workers: `147.267 -> 147.183 ms`, slight improvement.
+      - 3 workers: `120.003 -> 121.125 ms`, regression.
+      - 4 workers: `118.102 -> 119.912 ms`, regression.
+    - Exported tracked JSON matched exactly in every repeat and worker mode: `0.0` max abs over exported numeric fields.
+  - Decision:
+    - Rejected and reverted. The branch split helps some 2-worker paths and early detector ops, but it regresses the required 4-worker tracked mode consistently. The code size and instruction-cache effects appear to outweigh the removed branch in the current hot landmarker path.
+    - Do not keep 2-worker-only depthwise specializations unless the project explicitly prioritizes 2 cores over 4; current goal requires all 2/3/4 modes.

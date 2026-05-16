@@ -1072,3 +1072,32 @@ End-to-end NEON reference path:
     - The fixed-shape fused-op numbers improved, but the same-run 4-core tracked path regressed and raw landmarker also regressed.
     - This confirms the current rule: do not retain isolated operator wins unless they also improve tracked-frame timing or a consistently dominant raw-model path.
     - Fresh-context review again recommended the faithful local Cortex-A53 `6x8` pointwise full-block microkernel, especially for `conv2d_1x1_packed_add_tile` fused residual tiles. Suggested calibration ops are detector standalone `204`, landmarker fused `116->117` and `126->127`, and detector fused `123->124` / `135->136`.
+
+- 2026-05-16 rejected row-parallel ROI sampler experiment:
+  - Fresh-context review warned that the work is close to repeating old ideas, but separately identified exact row-parallel `sample_rotated_rect_rgb` as a valid candidate because it preserves the original per-pixel math and only splits independent output rows over the existing persistent worker pool.
+  - Runtime experiment, not retained:
+    - Added a generic `parallel_user_rows` dispatch on top of the existing `PoseRuntime` worker pool.
+    - Refactored `sample_rotated_rect_rgb` into a row function with precomputed rect constants and row-local zeroing.
+    - Routed `pipeline-rgb`, `pipeline-rgb-rect`, and `pipeline-rgb-track` landmarker input sampling through the landmarker runtime pool.
+  - Local validation:
+    - Built baseline and candidate locally:
+      - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_current_local -lm -pthread`
+      - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_sampler_parallel_local -lm -pthread`
+    - Raw tensor references still matched the existing local range: detector tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+    - Exported `pipeline-rgb-track` JSON on `out/human-for-pose.rgb`, `reps=16`, `refresh_interval=0`, matched exactly against the retained local binary for 2, 3, and 4 worker modes: `0.0` max abs diff over 355 numeric fields for each mode.
+    - Local Mac timing was only a smoke signal, not a target benchmark, but the sampler section moved from about `0.234/0.243/0.178 ms` to `0.117/0.084/0.082 ms` for 2/3/4 threads in that run.
+    - AArch64 cross-build succeeded with `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_samplerpar`.
+  - Pi validation path:
+    - `tailscale ssh max@pi3` still required a fresh Tailscale SSH check, but the older passwordless LAN path worked: `ssh -o BatchMode=yes max@192.168.1.174 true`.
+    - Copied `out/pose_neon_runtime_aarch64_directinput` and `out/pose_neon_runtime_aarch64_samplerpar` to `~/gemma4-robot/out/` on the Pi.
+    - Raw tensor references for the sampler candidate stayed in the usual range: detector tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+    - Direct-input staging removal is now Pi-validated: exported `pipeline-rgb-track` JSON matched the retained `out/pose_neon_runtime_aarch64_ofast` binary exactly for 2, 3, and 4 worker modes (`0.0` max abs over 355 numeric fields, `reps=48`, `refresh_interval=0`).
+    - Direct-input Pi timing in that same A/B run:
+      - 2 workers: retained tracked frame `153.584 ms`, direct-input `150.421 ms`.
+      - 3 workers: retained `124.891 ms`, direct-input `122.874 ms`.
+      - 4 workers: retained `122.993 ms`, direct-input `121.294 ms`.
+    - The first sampler-parallel Pi build reduced sample time but changed exported JSON by `0.045958638` after 48 tracked frames for every 2/3/4 worker mode. A second variant that recomputed sampler constants inside the row worker still differed by `0.0029350817` after only 8 tracked frames.
+    - Reverted the sampler-parallel runtime code. Do not revisit sampler parallelism unless the candidate proves exact or has an explicit final-landmark accuracy tolerance against the official reference, because ROI feedback amplifies even small sampling differences.
+    - Rebuilt the default binary from the retained direct-input source with `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_ofast` and copied it to the Pi over the LAN SSH path.
+    - Final Pi default smoke after refresh: detector tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+    - Final 4-core tracked default smoke, `reps=24`, `refresh_interval=0`: acquisition `301.258 ms`; sample `9.224 ms`; landmarker `116.725 ms`; tracked frame `126.417 ms`; `7.910 FPS`; amortized `138.970 ms` / `7.196 FPS`.

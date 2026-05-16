@@ -884,6 +884,24 @@ static void conv2d_1x1_packed_tile(
     }
     return;
   }
+  if (oc_count >= 4) {
+    for (int pi = 0; pi < p_count; ++pi) {
+      const float* src = input + (p0 + (size_t)pi) * in_c;
+      float* dst = output + (p0 + (size_t)pi) * out_c + oc0;
+      float32x4_t acc = vld1q_f32(bias);
+      for (int ci = 0; ci < in_c; ++ci) {
+        acc = vfmaq_n_f32(acc, vld1q_f32(weights + (size_t)ci * 8), src[ci]);
+      }
+      acc = activateq(acc, activation);
+      vst1q_f32(dst, acc);
+      for (int o = 4; o < oc_count; ++o) {
+        float tail = bias[o];
+        for (int ci = 0; ci < in_c; ++ci) tail += src[ci] * weights[(size_t)ci * 8 + o];
+        dst[o] = activate(tail, activation);
+      }
+    }
+    return;
+  }
 #endif
   for (int pi = 0; pi < p_count; ++pi) {
     const float* src = input + (p0 + (size_t)pi) * in_c;
@@ -1019,6 +1037,25 @@ static void conv2d_1x1_packed_add_tile(
       acc1 = activateq(vaddq_f32(acc1, vld1q_f32(res + 4)), activation);
       vst1q_f32(dst, acc0);
       vst1q_f32(dst + 4, acc1);
+    }
+    return;
+  }
+  if (oc_count >= 4) {
+    for (int pi = 0; pi < p_count; ++pi) {
+      const float* src = input + (p0 + (size_t)pi) * in_c;
+      const float* res = residual + (p0 + (size_t)pi) * out_c + oc0;
+      float* dst = output + (p0 + (size_t)pi) * out_c + oc0;
+      float32x4_t acc = vld1q_f32(bias);
+      for (int ci = 0; ci < in_c; ++ci) {
+        acc = vfmaq_n_f32(acc, vld1q_f32(weights + (size_t)ci * 8), src[ci]);
+      }
+      acc = activateq(vaddq_f32(acc, vld1q_f32(res)), activation);
+      vst1q_f32(dst, acc);
+      for (int o = 4; o < oc_count; ++o) {
+        float tail = bias[o];
+        for (int ci = 0; ci < in_c; ++ci) tail += src[ci] * weights[(size_t)ci * 8 + o];
+        dst[o] = activate(tail + res[o], activation);
+      }
     }
     return;
   }

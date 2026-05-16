@@ -705,3 +705,40 @@ End-to-end NEON reference path:
     - The 4-core tracked path remains noisy under current Pi load, so future claimed gains should continue using alternating old/new runs plus at least one longer run.
     - Fresh-context review found no blocking correctness issue with the fusion guards, noted that AArch64 FMA can be non-bit-identical to separate resize then add, and recommended the Pi raw-output, fused-op, and repeated tracked A/B validations recorded above.
     - Next high-leverage runtime work is still the fused residual pointwise microkernel or a targeted depthwise kernel for the current profile's named hot ops.
+
+- 2026-05-16 retained packed pointwise tail-vector path:
+  - Targeted pointwise convolutions whose output channels are not a multiple of 8.
+    - The full packed pointwise path already had AArch64 NEON kernels for complete 8-output-channel blocks, but partial blocks used scalar loops.
+    - This particularly affected the landmarker heatmap head at source op `234`, output `[1,64,64,39]`, whose final 7 channels were scalar.
+  - Runtime changes in `scripts/pose_neon_runtime.c`:
+    - Added an AArch64 `oc_count >= 4` partial-block path in `conv2d_1x1_packed_tile`.
+    - Added the same partial-block path in `conv2d_1x1_packed_add_tile` for future/non-multiple-of-8 fused residual cases.
+    - Full 8-channel `6x8`/`4x8`/`1x8` packed kernels are unchanged.
+  - Local correctness command:
+    - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime -lm -pthread && rm -rf /tmp/pose-det-pwtail /tmp/pose-lm-pwtail && mkdir -p /tmp/pose-det-pwtail /tmp/pose-lm-pwtail && /tmp/pose_neon_runtime out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-pwtail 4 1 out/pose_runtime_test_detector/ref && /tmp/pose_neon_runtime out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-pwtail 4 1 out/pose_runtime_test_noseg/ref`
+    - Detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+    - Landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+  - Pi cross-build/copy command for the experiment:
+    - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o out/pose_neon_runtime_aarch64_pwtail -lm -pthread'`
+    - `tar -cf - out/pose_neon_runtime_aarch64_pwtail | tailscale ssh max@pi3 'cd ~/gemma4-robot && tar -xf - && chmod +x out/pose_neon_runtime_aarch64_pwtail ...'`
+  - Pi op-level benchmark, 4 threads, `reps=40`, `warmup=4`:
+    - Landmarker op `234` heatmap head: old `5.287859 ms`; new `2.941455 ms`.
+    - Landmarker op `294` landmark head: old `0.709641 ms`; new `0.708488 ms` (tail is only 3 channels, so unchanged as expected).
+    - Landmarker op `298` world-landmark head: old `0.403348 ms`; new `0.365493 ms`.
+    - Landmarker op `302` presence head: old `0.003552 ms`; new `0.003685 ms` (1 output channel, scalar path unchanged).
+  - Pi tracked-frame and raw-model A/B:
+    - 2-core tracked, `reps=12`: old `199.681 ms` / `5.008 FPS`; new `196.265 ms` / `5.095 FPS`.
+    - 3-core tracked, `reps=12`: old `158.673 ms` / `6.302 FPS`; new `158.879 ms` / `6.294 FPS` (flat/noisy).
+    - 4-core tracked, `reps=12`: old `152.181 ms` / `6.571 FPS`; new `152.570 ms` / `6.554 FPS` (flat/noisy).
+    - 4-core raw landmarker, `reps=5`: old `149.247 ms`; new `136.736 ms`.
+    - 4-core tracked longer run 1, `reps=30`: old `149.818 ms` / `6.675 FPS`; new `145.123 ms` / `6.891 FPS`.
+    - 4-core tracked longer run 2, `reps=30`: old `147.092 ms` / `6.798 FPS`; new `144.954 ms` / `6.899 FPS`.
+  - Final default binary refresh:
+    - Rebuilt `out/pose_neon_runtime_aarch64_ofast` with the retained tail path and copied it to the Pi.
+    - Final Pi raw tensor check with the default binary stayed unchanged: detector tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.36e-5`.
+    - Final 4-core tracked sanity, `reps=20`: acquisition `355.641 ms`; sample `9.370 ms`; landmarker `136.236 ms`; tracked frame `147.163 ms`; `6.795 FPS`; amortized over 20 frames `164.945 ms` / `6.063 FPS`.
+  - Interpretation:
+    - This is a retained kernel-level improvement because the hot tail-heavy op `234` improves strongly and repeated longer tracked runs show end-to-end improvement despite noisy short tracked runs.
+    - The change intentionally does not alter full 8-channel packed kernels or scalar tails smaller than 4 channels.
+    - Fresh-context review found no blocking correctness issue. It confirmed the standalone partial-block path writes only real output lanes, the fused-add partial-block path preserves activation-after-residual ordering, and noted that fused-add tail benefit should not be claimed until a real non-multiple-of-8 residual op is benchmarked.
+    - Next high-leverage work remains a true A53 pointwise full-block microkernel or a fixed-shape depthwise path for the current named hot ops.

@@ -631,6 +631,106 @@ static void conv2d_3x3s2_rgb24_packed(
 #endif
 }
 
+static void conv2d_3x3s2_rgb24_from_pad_packed(
+    const float* input, const int32_t* pads, const float* weights, const float* bias, float* output,
+    int y0, int y1, int in_h, int in_w, int out_w, int activation) {
+  int top = pads[2];
+  int left = pads[4];
+#if defined(__aarch64__)
+  for (int oy = y0; oy < y1; ++oy) {
+    int py0 = oy * 2;
+    int interior_y = py0 >= top && py0 + 3 <= top + in_h;
+    for (int ox = 0; ox < out_w; ++ox) {
+      int px0 = ox * 2;
+      int interior = interior_y && px0 >= left && px0 + 3 <= left + in_w;
+      float32x4_t acc0 = vld1q_f32(bias + 0);
+      float32x4_t acc1 = vld1q_f32(bias + 4);
+      float32x4_t acc2 = vld1q_f32(bias + 8);
+      float32x4_t acc3 = vld1q_f32(bias + 12);
+      float32x4_t acc4 = vld1q_f32(bias + 16);
+      float32x4_t acc5 = vld1q_f32(bias + 20);
+      if (interior) {
+        const float* base = input + ((size_t)(py0 - top) * in_w + (px0 - left)) * 3;
+        for (int ky = 0; ky < 3; ++ky) {
+          const float* row = base + (size_t)ky * in_w * 3;
+          for (int kx = 0; kx < 3; ++kx) {
+            const float* src = row + kx * 3;
+            for (int ci = 0; ci < 3; ++ci) {
+              const float* wv = weights + ((ky * 3 + kx) * 3 + ci) * 24;
+              float v = src[ci];
+              acc0 = vfmaq_n_f32(acc0, vld1q_f32(wv + 0), v);
+              acc1 = vfmaq_n_f32(acc1, vld1q_f32(wv + 4), v);
+              acc2 = vfmaq_n_f32(acc2, vld1q_f32(wv + 8), v);
+              acc3 = vfmaq_n_f32(acc3, vld1q_f32(wv + 12), v);
+              acc4 = vfmaq_n_f32(acc4, vld1q_f32(wv + 16), v);
+              acc5 = vfmaq_n_f32(acc5, vld1q_f32(wv + 20), v);
+            }
+          }
+        }
+      } else {
+        for (int ky = 0; ky < 3; ++ky) {
+          int iy = py0 + ky - top;
+          if ((unsigned)iy >= (unsigned)in_h) continue;
+          for (int kx = 0; kx < 3; ++kx) {
+            int ix = px0 + kx - left;
+            if ((unsigned)ix >= (unsigned)in_w) continue;
+            const float* src = input + ((size_t)iy * in_w + ix) * 3;
+            for (int ci = 0; ci < 3; ++ci) {
+              const float* wv = weights + ((ky * 3 + kx) * 3 + ci) * 24;
+              float v = src[ci];
+              acc0 = vfmaq_n_f32(acc0, vld1q_f32(wv + 0), v);
+              acc1 = vfmaq_n_f32(acc1, vld1q_f32(wv + 4), v);
+              acc2 = vfmaq_n_f32(acc2, vld1q_f32(wv + 8), v);
+              acc3 = vfmaq_n_f32(acc3, vld1q_f32(wv + 12), v);
+              acc4 = vfmaq_n_f32(acc4, vld1q_f32(wv + 16), v);
+              acc5 = vfmaq_n_f32(acc5, vld1q_f32(wv + 20), v);
+            }
+          }
+        }
+      }
+      acc0 = activateq(acc0, activation);
+      acc1 = activateq(acc1, activation);
+      acc2 = activateq(acc2, activation);
+      acc3 = activateq(acc3, activation);
+      acc4 = activateq(acc4, activation);
+      acc5 = activateq(acc5, activation);
+      float* dst = output + ((size_t)oy * out_w + ox) * 24;
+      vst1q_f32(dst + 0, acc0);
+      vst1q_f32(dst + 4, acc1);
+      vst1q_f32(dst + 8, acc2);
+      vst1q_f32(dst + 12, acc3);
+      vst1q_f32(dst + 16, acc4);
+      vst1q_f32(dst + 20, acc5);
+    }
+  }
+#else
+  for (int oy = y0; oy < y1; ++oy) {
+    int py0 = oy * 2;
+    for (int ox = 0; ox < out_w; ++ox) {
+      int px0 = ox * 2;
+      float* dst = output + ((size_t)oy * out_w + ox) * 24;
+      for (int oc = 0; oc < 24; ++oc) {
+        float acc = bias[oc];
+        for (int ky = 0; ky < 3; ++ky) {
+          int iy = py0 + ky - top;
+          if ((unsigned)iy >= (unsigned)in_h) continue;
+          for (int kx = 0; kx < 3; ++kx) {
+            int ix = px0 + kx - left;
+            if ((unsigned)ix >= (unsigned)in_w) continue;
+            const float* src = input + ((size_t)iy * in_w + ix) * 3;
+            const float* wv = weights + ((ky * 3 + kx) * 3) * 24 + oc;
+            acc += src[0] * wv[0 * 24];
+            acc += src[1] * wv[1 * 24];
+            acc += src[2] * wv[2 * 24];
+          }
+        }
+        dst[oc] = activate(acc, activation);
+      }
+    }
+  }
+#endif
+}
+
 static void conv2d_1x1_packed_tile(
     const float* input, const PackedPointwiseX8* packed, float* output,
     size_t p0, int p_count, int oc_block, int oc_count, int activation) {
@@ -748,6 +848,145 @@ static void conv2d_1x1_packed_tile(
   }
 }
 
+static void conv2d_1x1_packed_add_tile(
+    const float* input, const PackedPointwiseX8* packed, const float* residual, float* output,
+    size_t p0, int p_count, int oc_block, int oc_count, int activation) {
+  int in_c = packed->in_c;
+  int out_c = packed->out_c;
+  int oc0 = oc_block * 8;
+  const float* block = packed->data + (size_t)oc_block * packed->block_stride;
+  const float* bias = block;
+  const float* weights = block + 8;
+#if defined(__aarch64__)
+  if (oc_count == 8 && p_count == 4) {
+    const float* s0 = input + (p0 + 0) * in_c;
+    const float* s1 = input + (p0 + 1) * in_c;
+    const float* s2 = input + (p0 + 2) * in_c;
+    const float* s3 = input + (p0 + 3) * in_c;
+    const float* r0 = residual + (p0 + 0) * out_c + oc0;
+    const float* r1 = residual + (p0 + 1) * out_c + oc0;
+    const float* r2 = residual + (p0 + 2) * out_c + oc0;
+    const float* r3 = residual + (p0 + 3) * out_c + oc0;
+    float* d0 = output + (p0 + 0) * out_c + oc0;
+    float* d1 = output + (p0 + 1) * out_c + oc0;
+    float* d2 = output + (p0 + 2) * out_c + oc0;
+    float* d3 = output + (p0 + 3) * out_c + oc0;
+    float32x4_t a00 = vld1q_f32(bias + 0), a01 = vld1q_f32(bias + 4);
+    float32x4_t a10 = a00, a11 = a01;
+    float32x4_t a20 = a00, a21 = a01;
+    float32x4_t a30 = a00, a31 = a01;
+    for (int ci = 0; ci < in_c; ++ci) {
+      const float* wv = weights + (size_t)ci * 8;
+      float32x4_t w0v = vld1q_f32(wv + 0);
+      float32x4_t w1v = vld1q_f32(wv + 4);
+      a00 = vfmaq_n_f32(a00, w0v, s0[ci]); a01 = vfmaq_n_f32(a01, w1v, s0[ci]);
+      a10 = vfmaq_n_f32(a10, w0v, s1[ci]); a11 = vfmaq_n_f32(a11, w1v, s1[ci]);
+      a20 = vfmaq_n_f32(a20, w0v, s2[ci]); a21 = vfmaq_n_f32(a21, w1v, s2[ci]);
+      a30 = vfmaq_n_f32(a30, w0v, s3[ci]); a31 = vfmaq_n_f32(a31, w1v, s3[ci]);
+    }
+    a00 = vaddq_f32(a00, vld1q_f32(r0 + 0)); a01 = vaddq_f32(a01, vld1q_f32(r0 + 4));
+    a10 = vaddq_f32(a10, vld1q_f32(r1 + 0)); a11 = vaddq_f32(a11, vld1q_f32(r1 + 4));
+    a20 = vaddq_f32(a20, vld1q_f32(r2 + 0)); a21 = vaddq_f32(a21, vld1q_f32(r2 + 4));
+    a30 = vaddq_f32(a30, vld1q_f32(r3 + 0)); a31 = vaddq_f32(a31, vld1q_f32(r3 + 4));
+    a00 = activateq(a00, activation); a01 = activateq(a01, activation);
+    a10 = activateq(a10, activation); a11 = activateq(a11, activation);
+    a20 = activateq(a20, activation); a21 = activateq(a21, activation);
+    a30 = activateq(a30, activation); a31 = activateq(a31, activation);
+    vst1q_f32(d0 + 0, a00); vst1q_f32(d0 + 4, a01);
+    vst1q_f32(d1 + 0, a10); vst1q_f32(d1 + 4, a11);
+    vst1q_f32(d2 + 0, a20); vst1q_f32(d2 + 4, a21);
+    vst1q_f32(d3 + 0, a30); vst1q_f32(d3 + 4, a31);
+    return;
+  }
+  if (oc_count == 8 && p_count == 6) {
+    const float* s0 = input + (p0 + 0) * in_c;
+    const float* s1 = input + (p0 + 1) * in_c;
+    const float* s2 = input + (p0 + 2) * in_c;
+    const float* s3 = input + (p0 + 3) * in_c;
+    const float* s4 = input + (p0 + 4) * in_c;
+    const float* s5 = input + (p0 + 5) * in_c;
+    const float* r0 = residual + (p0 + 0) * out_c + oc0;
+    const float* r1 = residual + (p0 + 1) * out_c + oc0;
+    const float* r2 = residual + (p0 + 2) * out_c + oc0;
+    const float* r3 = residual + (p0 + 3) * out_c + oc0;
+    const float* r4 = residual + (p0 + 4) * out_c + oc0;
+    const float* r5 = residual + (p0 + 5) * out_c + oc0;
+    float* d0 = output + (p0 + 0) * out_c + oc0;
+    float* d1 = output + (p0 + 1) * out_c + oc0;
+    float* d2 = output + (p0 + 2) * out_c + oc0;
+    float* d3 = output + (p0 + 3) * out_c + oc0;
+    float* d4 = output + (p0 + 4) * out_c + oc0;
+    float* d5 = output + (p0 + 5) * out_c + oc0;
+    float32x4_t a00 = vld1q_f32(bias + 0), a01 = vld1q_f32(bias + 4);
+    float32x4_t a10 = a00, a11 = a01;
+    float32x4_t a20 = a00, a21 = a01;
+    float32x4_t a30 = a00, a31 = a01;
+    float32x4_t a40 = a00, a41 = a01;
+    float32x4_t a50 = a00, a51 = a01;
+    for (int ci = 0; ci < in_c; ++ci) {
+      const float* wv = weights + (size_t)ci * 8;
+      float32x4_t w0v = vld1q_f32(wv + 0);
+      float32x4_t w1v = vld1q_f32(wv + 4);
+      a00 = vfmaq_n_f32(a00, w0v, s0[ci]); a01 = vfmaq_n_f32(a01, w1v, s0[ci]);
+      a10 = vfmaq_n_f32(a10, w0v, s1[ci]); a11 = vfmaq_n_f32(a11, w1v, s1[ci]);
+      a20 = vfmaq_n_f32(a20, w0v, s2[ci]); a21 = vfmaq_n_f32(a21, w1v, s2[ci]);
+      a30 = vfmaq_n_f32(a30, w0v, s3[ci]); a31 = vfmaq_n_f32(a31, w1v, s3[ci]);
+      a40 = vfmaq_n_f32(a40, w0v, s4[ci]); a41 = vfmaq_n_f32(a41, w1v, s4[ci]);
+      a50 = vfmaq_n_f32(a50, w0v, s5[ci]); a51 = vfmaq_n_f32(a51, w1v, s5[ci]);
+    }
+    a00 = vaddq_f32(a00, vld1q_f32(r0 + 0)); a01 = vaddq_f32(a01, vld1q_f32(r0 + 4));
+    a10 = vaddq_f32(a10, vld1q_f32(r1 + 0)); a11 = vaddq_f32(a11, vld1q_f32(r1 + 4));
+    a20 = vaddq_f32(a20, vld1q_f32(r2 + 0)); a21 = vaddq_f32(a21, vld1q_f32(r2 + 4));
+    a30 = vaddq_f32(a30, vld1q_f32(r3 + 0)); a31 = vaddq_f32(a31, vld1q_f32(r3 + 4));
+    a40 = vaddq_f32(a40, vld1q_f32(r4 + 0)); a41 = vaddq_f32(a41, vld1q_f32(r4 + 4));
+    a50 = vaddq_f32(a50, vld1q_f32(r5 + 0)); a51 = vaddq_f32(a51, vld1q_f32(r5 + 4));
+    a00 = activateq(a00, activation); a01 = activateq(a01, activation);
+    a10 = activateq(a10, activation); a11 = activateq(a11, activation);
+    a20 = activateq(a20, activation); a21 = activateq(a21, activation);
+    a30 = activateq(a30, activation); a31 = activateq(a31, activation);
+    a40 = activateq(a40, activation); a41 = activateq(a41, activation);
+    a50 = activateq(a50, activation); a51 = activateq(a51, activation);
+    vst1q_f32(d0 + 0, a00); vst1q_f32(d0 + 4, a01);
+    vst1q_f32(d1 + 0, a10); vst1q_f32(d1 + 4, a11);
+    vst1q_f32(d2 + 0, a20); vst1q_f32(d2 + 4, a21);
+    vst1q_f32(d3 + 0, a30); vst1q_f32(d3 + 4, a31);
+    vst1q_f32(d4 + 0, a40); vst1q_f32(d4 + 4, a41);
+    vst1q_f32(d5 + 0, a50); vst1q_f32(d5 + 4, a51);
+    return;
+  }
+  if (oc_count == 8) {
+    for (int pi = 0; pi < p_count; ++pi) {
+      const float* src = input + (p0 + (size_t)pi) * in_c;
+      const float* res = residual + (p0 + (size_t)pi) * out_c + oc0;
+      float* dst = output + (p0 + (size_t)pi) * out_c + oc0;
+      float32x4_t acc0 = vld1q_f32(bias);
+      float32x4_t acc1 = vld1q_f32(bias + 4);
+      for (int ci = 0; ci < in_c; ++ci) {
+        const float* wv = weights + (size_t)ci * 8;
+        float v = src[ci];
+        acc0 = vfmaq_n_f32(acc0, vld1q_f32(wv), v);
+        acc1 = vfmaq_n_f32(acc1, vld1q_f32(wv + 4), v);
+      }
+      acc0 = activateq(vaddq_f32(acc0, vld1q_f32(res)), activation);
+      acc1 = activateq(vaddq_f32(acc1, vld1q_f32(res + 4)), activation);
+      vst1q_f32(dst, acc0);
+      vst1q_f32(dst + 4, acc1);
+    }
+    return;
+  }
+#endif
+  for (int pi = 0; pi < p_count; ++pi) {
+    const float* src = input + (p0 + (size_t)pi) * in_c;
+    const float* res = residual + (p0 + (size_t)pi) * out_c + oc0;
+    float* dst = output + (p0 + (size_t)pi) * out_c + oc0;
+    for (int o = 0; o < oc_count; ++o) {
+      float acc = bias[o];
+      for (int ci = 0; ci < in_c; ++ci) acc += src[ci] * weights[(size_t)ci * 8 + o];
+      dst[o] = activate(acc + res[o], activation);
+    }
+  }
+}
+
 static void op_conv2d_1x1_packed_tiles(PoseRuntime* rt, const PoseOpDef* op, int item0, int item1) {
   const float* input = (const float*)rt->tensor[op->inputs[0]];
   const PackedPointwiseX8* packed = (const PackedPointwiseX8*)rt->packed[op->inputs[1]];
@@ -764,6 +1003,37 @@ static void op_conv2d_1x1_packed_tiles(PoseRuntime* rt, const PoseOpDef* op, int
     int oc_count = out_c - oc0 < 8 ? out_c - oc0 : 8;
     conv2d_1x1_packed_tile(input, packed, output, p0, p_count, oc_block, oc_count, op->activation);
   }
+}
+
+static void op_conv2d_1x1_add_packed_tiles(PoseRuntime* rt, const PoseOpDef* conv_op, int item0, int item1) {
+  const PoseOpDef* add_op = rt->task_aux_op;
+  const float* input = (const float*)rt->tensor[conv_op->inputs[0]];
+  const PackedPointwiseX8* packed = (const PackedPointwiseX8*)rt->packed[conv_op->inputs[1]];
+  int residual_idx = add_op->inputs[0] == conv_op->outputs[0] ? add_op->inputs[1] : add_op->inputs[0];
+  const float* residual = (const float*)rt->tensor[residual_idx];
+  float* output = (float*)rt->tensor[add_op->outputs[0]];
+  const PoseTensorDef* out = &rt->def->tensors[add_op->outputs[0]];
+  int out_c = out->dims[3];
+  size_t pixels = (size_t)out->dims[1] * out->dims[2];
+  int oc_blocks = (out_c + 7) / 8;
+  for (int item = item0; item < item1; ++item) {
+    size_t p0 = (size_t)(item / oc_blocks) * POSE_PW_TILE;
+    int oc_block = item % oc_blocks;
+    int oc0 = oc_block * 8;
+    int p_count = (int)(pixels - p0 < POSE_PW_TILE ? pixels - p0 : POSE_PW_TILE);
+    int oc_count = out_c - oc0 < 8 ? out_c - oc0 : 8;
+    conv2d_1x1_packed_add_tile(
+        input, packed, residual, output,
+        p0, p_count, oc_block, oc_count, add_op->activation);
+  }
+}
+
+static void op_conv2d_1x1_add_packed(PoseRuntime* rt, const PoseOpDef* conv_op, const PoseOpDef* add_op) {
+  const PoseTensorDef* out = &rt->def->tensors[add_op->outputs[0]];
+  size_t pixels = (size_t)out->dims[1] * out->dims[2];
+  int pixel_tiles = (int)((pixels + POSE_PW_TILE - 1) / POSE_PW_TILE);
+  int oc_blocks = (out->dims[3] + 7) / 8;
+  parallel_rows_aux(rt, conv_op, add_op, pixel_tiles * oc_blocks, op_conv2d_1x1_add_packed_tiles);
 }
 
 static void op_conv2d_rows(PoseRuntime* rt, const PoseOpDef* op, int y0, int y1) {
@@ -831,6 +1101,25 @@ static void op_conv2d(PoseRuntime* rt, const PoseOpDef* op) {
   }
   const PoseTensorDef* out = &rt->def->tensors[op->outputs[0]];
   parallel_rows(rt, op, out->dims[1], op_conv2d_rows);
+}
+
+static void op_conv2d_3x3s2_rgb24_from_pad_rows(PoseRuntime* rt, const PoseOpDef* pad_op, int y0, int y1) {
+  const PoseOpDef* conv_op = rt->task_aux_op;
+  const float* input = (const float*)rt->tensor[pad_op->inputs[0]];
+  const int32_t* pads = (const int32_t*)rt->tensor[pad_op->inputs[1]];
+  const float* weights = (const float*)rt->packed[conv_op->inputs[1]];
+  const float* bias = (const float*)rt->tensor[conv_op->inputs[2]];
+  float* output = (float*)rt->tensor[conv_op->outputs[0]];
+  const PoseTensorDef* in = &rt->def->tensors[pad_op->inputs[0]];
+  const PoseTensorDef* out = &rt->def->tensors[conv_op->outputs[0]];
+  conv2d_3x3s2_rgb24_from_pad_packed(
+      input, pads, weights, bias, output,
+      y0, y1, in->dims[1], in->dims[2], out->dims[2], conv_op->activation);
+}
+
+static void op_conv2d_3x3s2_rgb24_from_pad(PoseRuntime* rt, const PoseOpDef* pad_op, const PoseOpDef* conv_op) {
+  const PoseTensorDef* out = &rt->def->tensors[conv_op->outputs[0]];
+  parallel_rows_aux(rt, pad_op, conv_op, out->dims[1], op_conv2d_3x3s2_rgb24_from_pad_rows);
 }
 
 static void depthwise_3x3_checked_pixel(
@@ -1593,6 +1882,14 @@ static int tensor_consumer_count_after(const PoseModelDef* def, int op_start, in
   return count;
 }
 
+static int same_tensor_shape(const PoseTensorDef* a, const PoseTensorDef* b) {
+  if (a->rank != b->rank) return 0;
+  for (int i = 0; i < a->rank; ++i) {
+    if (a->dims[i] != b->dims[i]) return 0;
+  }
+  return 1;
+}
+
 static int can_fuse_pad_depthwise(const PoseRuntime* rt, int op_index) {
   if (op_index + 1 >= rt->def->op_count) return 0;
   const PoseOpDef* pad_op = &rt->def->ops[op_index];
@@ -1611,10 +1908,72 @@ static int can_fuse_pad_depthwise(const PoseRuntime* rt, int op_index) {
   return 1;
 }
 
+static int can_fuse_pointwise_conv_add(const PoseRuntime* rt, int op_index) {
+  if (op_index + 1 >= rt->def->op_count) return 0;
+  const PoseOpDef* conv_op = &rt->def->ops[op_index];
+  const PoseOpDef* add_op = &rt->def->ops[op_index + 1];
+  if (conv_op->op != POSE_OP_CONV2D || add_op->op != POSE_OP_ADD) return 0;
+  if (conv_op->activation != 0) return 0;
+  if (add_op->input_count != 2 || add_op->output_count != 1) return 0;
+  int conv_out = conv_op->outputs[0];
+  int residual_idx = -1;
+  if (add_op->inputs[0] == conv_out) residual_idx = add_op->inputs[1];
+  if (add_op->inputs[1] == conv_out) residual_idx = add_op->inputs[0];
+  if (residual_idx < 0) return 0;
+  if (tensor_consumer_count_after(rt->def, op_index + 1, conv_out) != 1) return 0;
+  if (rt->packed_type[conv_op->inputs[1]] != POSE_PACK_POINTWISE_X8) return 0;
+  const PoseTensorDef* wt = &rt->def->tensors[conv_op->inputs[1]];
+  if (wt->dims[1] != 1 || wt->dims[2] != 1 || conv_op->stride_h != 1 || conv_op->stride_w != 1) return 0;
+  const PoseTensorDef* conv_out_def = &rt->def->tensors[conv_out];
+  const PoseTensorDef* residual = &rt->def->tensors[residual_idx];
+  const PoseTensorDef* add_out = &rt->def->tensors[add_op->outputs[0]];
+  if (conv_out_def->rank != 4 || residual->rank != 4 || add_out->rank != 4) return 0;
+  if (!same_tensor_shape(conv_out_def, residual) || !same_tensor_shape(conv_out_def, add_out)) return 0;
+  return 1;
+}
+
+static int can_fuse_pad_rgb_stride2_conv(const PoseRuntime* rt, int op_index) {
+  if (op_index + 1 >= rt->def->op_count) return 0;
+  const PoseOpDef* pad_op = &rt->def->ops[op_index];
+  const PoseOpDef* conv_op = &rt->def->ops[op_index + 1];
+  if (pad_op->op != POSE_OP_PAD || conv_op->op != POSE_OP_CONV2D) return 0;
+  if (conv_op->inputs[0] != pad_op->outputs[0]) return 0;
+  if (tensor_consumer_count_after(rt->def, op_index + 1, pad_op->outputs[0]) != 1) return 0;
+  if (conv_op->stride_h != 2 || conv_op->stride_w != 2 ||
+      conv_op->dilation_h != 1 || conv_op->dilation_w != 1 ||
+      conv_op->padding != 1) {
+    return 0;
+  }
+  if (rt->packed_type[conv_op->inputs[1]] != POSE_PACK_ICOC) return 0;
+  const PoseTensorDef* in = &rt->def->tensors[pad_op->inputs[0]];
+  const PoseTensorDef* padded = &rt->def->tensors[pad_op->outputs[0]];
+  const PoseTensorDef* wt = &rt->def->tensors[conv_op->inputs[1]];
+  const PoseTensorDef* out = &rt->def->tensors[conv_op->outputs[0]];
+  if (in->rank != 4 || padded->rank != 4 || wt->rank != 4 || out->rank != 4) return 0;
+  if (in->dims[3] != 3 || padded->dims[3] != 3) return 0;
+  if (wt->dims[0] != 24 || wt->dims[1] != 3 || wt->dims[2] != 3 || wt->dims[3] != 3) return 0;
+  if (out->dims[3] != 24) return 0;
+  return 1;
+}
+
 static void run_model(PoseRuntime* rt, int profile) {
   double* times_ms = NULL;
   if (profile) times_ms = (double*)calloc((size_t)rt->def->op_count, sizeof(double));
   for (int i = 0; i < rt->def->op_count; ++i) {
+    if (can_fuse_pad_rgb_stride2_conv(rt, i)) {
+      double t0 = profile ? now_s() : 0.0;
+      op_conv2d_3x3s2_rgb24_from_pad(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
+      if (profile) times_ms[i + 1] += (now_s() - t0) * 1000.0;
+      i++;
+      continue;
+    }
+    if (can_fuse_pointwise_conv_add(rt, i)) {
+      double t0 = profile ? now_s() : 0.0;
+      op_conv2d_1x1_add_packed(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
+      if (profile) times_ms[i] += (now_s() - t0) * 1000.0;
+      i++;
+      continue;
+    }
     if (can_fuse_pad_depthwise(rt, i)) {
       double t0 = profile ? now_s() : 0.0;
       op_depthwise_from_pad(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);

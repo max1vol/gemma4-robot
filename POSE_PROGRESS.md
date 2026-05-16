@@ -458,6 +458,20 @@ End-to-end graph executor status:
     - Next best measured target once Pi access is restored:
       - Prefer a fresh, narrow depthwise experiment against `049 PAD+DEPTHWISE` or `032 DEPTHWISE`, but do not repeat the already rejected fused stride-2 branch-hoist/fixed-shape attempt unless the implementation is materially different and improves integrated tracked A/B.
       - The `mr < 6` pointwise assembly route can also be tested, but expected end-to-end gain is small because it mainly affects pixel-tail tiles and single-pixel heads.
+  - 2026-05-16 direct pipeline input staging removal:
+    - Fresh-context review pointed out that the camera pipeline still wrote detector and landmarker inputs into temporary aligned buffers, then copied those buffers into each runtime input tensor.
+    - Runtime change:
+      - `run_pipeline_rgb`, `run_pipeline_rgb_rect`, and `run_pipeline_rgb_track` now write `resize_letterbox_rgb()` and `sample_rotated_rect_rgb()` outputs directly into the corresponding runtime input tensor.
+      - Removed the per-frame `memcpy` of `224*224*3` detector floats and `256*256*3` landmarker floats from those pipeline paths.
+      - Model arithmetic, ROI math, tensor layouts, and worker scheduling are unchanged.
+    - Local validation:
+      - Built with `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_directinput_local -lm -pthread`.
+      - `pipeline-rgb-track` on `out/human-for-pose.rgb`, `reps=8`, matched the previous local binary exactly across 355 exported numeric fields (`0.0` max abs diff).
+      - Local timing hint for `pipeline-rgb-track`, `reps=8`: old tracked frame `2.593 ms`, new `2.526 ms`; local Mac timing is not the target benchmark, only a smoke signal.
+      - AArch64 cross-build with `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_directinput` succeeded.
+    - Pi validation is pending:
+      - `tailscale ssh max@pi3` is currently blocked by a fresh Tailscale SSH check, so Pi A/B timing and raw tensor confirmation for this change could not be run in this pass.
+      - The change is intentionally copy-removal only; the next Pi run should compare `pipeline-rgb-track` JSON and 2/3/4-core tracked timings before making a speed claim.
 
 Persistent thread-pool prefix runner:
 

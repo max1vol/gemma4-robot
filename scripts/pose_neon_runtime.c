@@ -3573,14 +3573,14 @@ static int run_pipeline_rgb(
     const char* out_json, int threads, int reps) {
   if (reps < 1) reps = 1;
   uint8_t* rgb = read_rgb24(rgb_path, image_w, image_h);
-  float* detector_input = (float*)xaligned_alloc(64, (size_t)224 * 224 * 3 * sizeof(float));
-  float* landmarker_input = (float*)xaligned_alloc(64, (size_t)256 * 256 * 3 * sizeof(float));
   PoseRuntime detector_rt;
   runtime_init(&detector_rt, &pose_detector_model, data_dir, threads);
   runtime_start_pool(&detector_rt);
   PoseRuntime landmarker_rt;
   runtime_init(&landmarker_rt, &pose_landmarker_model, data_dir, threads);
   runtime_start_pool(&landmarker_rt);
+  float* detector_input = (float*)detector_rt.tensor[pose_detector_model.inputs[0]];
+  float* landmarker_input = (float*)landmarker_rt.tensor[pose_landmarker_model.inputs[0]];
 
   PoseDetection det;
   PoseRect rect;
@@ -3594,7 +3594,6 @@ static int run_pipeline_rgb(
   for (int rep = 0; rep < reps; ++rep) {
     double frame_t0 = now_s();
     Letterbox lb = resize_letterbox_rgb(rgb, image_w, image_h, 224, detector_input);
-    memcpy(detector_rt.tensor[pose_detector_model.inputs[0]], detector_input, (size_t)224 * 224 * 3 * sizeof(float));
     double det_t0 = now_s();
     run_model(&detector_rt, 0);
     double det_t1 = now_s();
@@ -3611,7 +3610,6 @@ static int run_pipeline_rgb(
 
     rect = rect_from_detection_c(&det, image_w, image_h);
     sample_rotated_rect_rgb(rgb, image_w, image_h, &rect, 256, landmarker_input);
-    memcpy(landmarker_rt.tensor[pose_landmarker_model.inputs[0]], landmarker_input, (size_t)256 * 256 * 3 * sizeof(float));
     double lm_t0 = now_s();
     run_model(&landmarker_rt, 0);
     double lm_t1 = now_s();
@@ -3637,8 +3635,6 @@ static int run_pipeline_rgb(
 
   runtime_destroy(&landmarker_rt);
   runtime_destroy(&detector_rt);
-  free(detector_input);
-  free(landmarker_input);
   free(rgb);
   return 0;
 }
@@ -3648,10 +3644,10 @@ static int run_pipeline_rgb_rect(
     PoseRect rect, const char* out_json, int threads, int reps) {
   if (reps < 1) reps = 1;
   uint8_t* rgb = read_rgb24(rgb_path, image_w, image_h);
-  float* landmarker_input = (float*)xaligned_alloc(64, (size_t)256 * 256 * 3 * sizeof(float));
   PoseRuntime landmarker_rt;
   runtime_init(&landmarker_rt, &pose_landmarker_model, data_dir, threads);
   runtime_start_pool(&landmarker_rt);
+  float* landmarker_input = (float*)landmarker_rt.tensor[pose_landmarker_model.inputs[0]];
 
   PoseLandmark internal[39];
   PoseLandmark pose_lm[33];
@@ -3665,7 +3661,6 @@ static int run_pipeline_rgb_rect(
     sample_rotated_rect_rgb(rgb, image_w, image_h, &rect, 256, landmarker_input);
     double sample_t1 = now_s();
     sample_ms += (sample_t1 - sample_t0) * 1000.0;
-    memcpy(landmarker_rt.tensor[pose_landmarker_model.inputs[0]], landmarker_input, (size_t)256 * 256 * 3 * sizeof(float));
     double lm_t0 = now_s();
     run_model(&landmarker_rt, 0);
     double lm_t1 = now_s();
@@ -3687,7 +3682,6 @@ static int run_pipeline_rgb_rect(
       frame_ms / (double)reps, 1000.0 * (double)reps / frame_ms);
 
   runtime_destroy(&landmarker_rt);
-  free(landmarker_input);
   free(rgb);
   return 0;
 }
@@ -3698,14 +3692,14 @@ static int run_pipeline_rgb_track(
   if (reps < 1) reps = 1;
   if (refresh_interval < 0) refresh_interval = 0;
   uint8_t* rgb = read_rgb24(rgb_path, image_w, image_h);
-  float* detector_input = (float*)xaligned_alloc(64, (size_t)224 * 224 * 3 * sizeof(float));
-  float* landmarker_input = (float*)xaligned_alloc(64, (size_t)256 * 256 * 3 * sizeof(float));
   PoseRuntime detector_rt;
   runtime_init(&detector_rt, &pose_detector_model, data_dir, threads);
   runtime_start_pool(&detector_rt);
   PoseRuntime landmarker_rt;
   runtime_init(&landmarker_rt, &pose_landmarker_model, data_dir, threads);
   runtime_start_pool(&landmarker_rt);
+  float* detector_input = (float*)detector_rt.tensor[pose_detector_model.inputs[0]];
+  float* landmarker_input = (float*)landmarker_rt.tensor[pose_landmarker_model.inputs[0]];
 
   PoseDetection det;
   PoseRect rect;
@@ -3722,7 +3716,6 @@ static int run_pipeline_rgb_track(
 
   double acquire_t0 = now_s();
   Letterbox lb = resize_letterbox_rgb(rgb, image_w, image_h, 224, detector_input);
-  memcpy(detector_rt.tensor[pose_detector_model.inputs[0]], detector_input, (size_t)224 * 224 * 3 * sizeof(float));
   run_model(&detector_rt, 0);
   if (!decode_best_detection(
           (const float*)detector_rt.tensor[441],
@@ -3734,8 +3727,6 @@ static int run_pipeline_rgb_track(
         threads, reps, (now_s() - acquire_t0) * 1000.0);
     runtime_destroy(&landmarker_rt);
     runtime_destroy(&detector_rt);
-    free(detector_input);
-    free(landmarker_input);
     free(rgb);
     return 0;
   }
@@ -3748,7 +3739,6 @@ static int run_pipeline_rgb_track(
     if (rep > 0 && (need_acquire || (refresh_interval > 0 && rep % refresh_interval == 0))) {
       double refresh_t0 = now_s();
       lb = resize_letterbox_rgb(rgb, image_w, image_h, 224, detector_input);
-      memcpy(detector_rt.tensor[pose_detector_model.inputs[0]], detector_input, (size_t)224 * 224 * 3 * sizeof(float));
       run_model(&detector_rt, 0);
       if (!decode_best_detection(
               (const float*)detector_rt.tensor[441],
@@ -3773,7 +3763,6 @@ static int run_pipeline_rgb_track(
     sample_rotated_rect_rgb(rgb, image_w, image_h, &used_rect, 256, landmarker_input);
     double sample_t1 = now_s();
     sample_ms += (sample_t1 - sample_t0) * 1000.0;
-    memcpy(landmarker_rt.tensor[pose_landmarker_model.inputs[0]], landmarker_input, (size_t)256 * 256 * 3 * sizeof(float));
     double lm_t0 = now_s();
     run_model(&landmarker_rt, 0);
     double lm_t1 = now_s();
@@ -3806,8 +3795,6 @@ static int run_pipeline_rgb_track(
 
   runtime_destroy(&landmarker_rt);
   runtime_destroy(&detector_rt);
-  free(detector_input);
-  free(landmarker_input);
   free(rgb);
   return 0;
 }

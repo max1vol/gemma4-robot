@@ -1470,3 +1470,39 @@ End-to-end NEON reference path:
   - Decision:
     - Retained. The fused graph-level path gives a measured chain win at 2/3/4 workers, stable tracked wins at 3/4 workers, and after candidate-first retesting also a clear 2-worker tracked win. The one old-first 2-worker repeat regressed by `0.356 ms`, so keep watching 2-worker noise in the next experiment, but the longer reversed-order check supports retaining this change.
     - Next target should extend the same pattern to another graph chain only after profiling, likely `058->061->062` with a 5x5 depthwise scratch tile or another high-intermediate 3x3 chain. Avoid returning to isolated first-conv/tail-kernel gates unless a profile points there.
+
+- 2026-05-16 rejected landmarker `058->061->062` fused 5x5 `DEPTHWISE->CONV2D->ADD` tile path:
+  - Motivation:
+    - Continued the retained graph-level fusion strategy after `032->035->036`. A fresh-context reviewer independently recommended landmarker `058 DEPTHWISE -> 061 CONV2D -> 062 ADD`: input/output `[1,32,32,144]`, 5x5 SAME depthwise with ReLU6, packed 1x1 output `[1,32,32,24]`, then residual add.
+    - The hoped-for gain was removing one worker-pool dispatch and avoiding write/read of the `[1,32,32,144]` intermediate, roughly `576 KiB` written plus `576 KiB` reread.
+  - Current retained profile refreshed on Pi 3B+ before editing:
+    - `vcgencmd get_throttled` still reported `0x50005`.
+    - Current `ofast` sha256: `d0ab0d7e55766b9f0aeb799267ada772d910ae8e0dee9c955bf3dd6f60cb7750`.
+    - Landmarker 4-worker profile totals: CONV2D `81.660 ms`, DEPTHWISE `68.078 ms`, RESIZE_BILINEAR `4.338 ms`; single profiled rep `155.921 ms`.
+    - Top ops included `049 DEPTHWISE 7.313 ms`, retained fused `032` chain accounted under `032 DEPTHWISE 6.819 ms`, `006 DEPTHWISE 6.264 ms`, first conv `003 CONV2D 5.796 ms`, `058 DEPTHWISE 5.466 ms`, and `012 CONV2D 5.117 ms`.
+    - Targeted retained hot benches, `reps=30`, `warmup=4`:
+      - `058 DEPTHWISE`: 2 workers `5.916 ms`, 3 workers `4.810 ms`, 4 workers `3.810 ms`.
+      - `061 CONV2D+ADD`: 2 workers `1.507 ms`, 3 workers `1.084 ms`, 4 workers `0.941 ms`.
+  - Candidate 1, direct 5x5 six-output scratch producer:
+    - Added `depthwise_5x5s1_same_tile_to_tmp` and allowed `can_fuse_depthwise_pointwise_add` for source op `058`.
+    - The fast path handled only six same-row interior pixels; border and row-crossing tiles fell back to checked per-pixel scratch. Local x86 exported landmarker outputs matched exactly with the fusion enabled vs `POSE_FUSE_DW_PW_ADD=0`.
+    - Cross-built as `out/pose_neon_runtime_aarch64_dw5pw58`; Pi raw checks stayed in the usual range:
+      - Detector 4-thread single rep: `296.636 ms`; tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`.
+      - Landmarker 4-thread single rep: `129.800 ms`; tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+    - Targeted `bench-op 58`, old separated path forced with `POSE_FUSE_DW_PW_ADD=0`, `reps=50`, `warmup=6`:
+      - 2 workers: old `058` `6.316 ms` + old `061->062` `1.455 ms` = `7.772 ms`; fused `7.987 ms`, regression.
+      - 3 workers: old `4.332 ms` + `1.106 ms` = `5.438 ms`; fused `6.205 ms`, regression.
+      - 4 workers: old `4.847 ms` + `0.946 ms` = `5.792 ms`; fused `4.897 ms`, improvement.
+    - Decision on candidate 1: not retainable because the project requires 2/3/4-worker modes and 2/3 regressed.
+  - Candidate 2, reuse existing 5x5 quad+pair depthwise row helpers for scratch:
+    - Replaced the six-output row helper with a four-output call plus a two-output call, trying to match the retained standalone 5x5 depthwise schedule while still writing scratch.
+    - Local x86 exported outputs again matched exactly with the fusion enabled vs disabled.
+    - Cross-built as `out/pose_neon_runtime_aarch64_dw5pair58`; Pi raw landmarker stayed in the usual range: 4-thread single rep `118.800 ms`, same tensor diffs as above.
+    - Targeted `bench-op 58`, old separated path forced with `POSE_FUSE_DW_PW_ADD=0`, `reps=50`, `warmup=6`:
+      - 2 workers: old `6.064 ms` + `1.572 ms` = `7.636 ms`; fused `8.883 ms`, regression.
+      - 3 workers: old `5.136 ms` + `1.649 ms` = `6.785 ms`; fused `6.683 ms`, tiny isolated improvement but within noise.
+      - 4 workers: old `4.692 ms` + `0.943 ms` = `5.635 ms`; fused `6.310 ms`, regression.
+    - Decision on candidate 2: rejected and runtime changes reverted. Reusing the standalone 5x5 helpers did not preserve their performance when writing scratch and then immediately running pointwise. This chain needs either a true fused depthwise-pointwise accumulator that does not materialize all 144 channels, or it should be skipped in favor of a different graph chain.
+  - Final decision:
+    - Rejected both `058->061->062` attempts. Correctness was fine, but neither implementation beat the retained separated path across 2/3/4 workers.
+    - Next better candidates: either `049 PAD->DEPTHWISE->052 CONV2D` with a direct padded-depthwise scratch producer, or a smaller worker-dispatch/scheduling measurement before adding more scratch-producing fusions. Do not retry `058->061->062` with another scratch-only variant unless it materially avoids the intermediate scratch cost.

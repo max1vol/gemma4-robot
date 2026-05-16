@@ -1101,3 +1101,47 @@ End-to-end NEON reference path:
     - Rebuilt the default binary from the retained direct-input source with `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_ofast` and copied it to the Pi over the LAN SSH path.
     - Final Pi default smoke after refresh: detector tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
     - Final 4-core tracked default smoke, `reps=24`, `refresh_interval=0`: acquisition `301.258 ms`; sample `9.224 ms`; landmarker `116.725 ms`; tracked frame `126.417 ms`; `7.910 FPS`; amortized `138.970 ms` / `7.196 FPS`.
+
+- 2026-05-16 retained 5x5 stride-1 SAME depthwise quad-column specialization:
+  - Refreshed current Pi profile before editing:
+    - Command used LAN SSH because Tailscale SSH still required a browser check:
+      - `ssh -o BatchMode=yes max@192.168.1.174 'cd ~/gemma4-robot && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast ... detector ... && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast ... landmarker ... && ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track ... 4 24 0'`.
+    - Detector totals: `CONV2D 146.123 ms`, `DEPTHWISE 92.402 ms`; top ops included detector `204 CONV2D 14.789 ms`, `029 DEPTHWISE 10.021 ms`, `053 DEPTHWISE 9.222 ms`, `042 DEPTHWISE 8.935 ms`, `014 CONV2D 8.430 ms`, `131 DEPTHWISE 8.083 ms`, and `119 DEPTHWISE 7.968 ms`.
+    - Landmarker totals: `CONV2D 91.880 ms`, `DEPTHWISE 84.466 ms`; top ops included `058 DEPTHWISE 8.727 ms`, `032 DEPTHWISE 8.202 ms`, `123 DEPTHWISE 7.584 ms`, `049 PAD+DEPTHWISE 7.464 ms`, `006 DEPTHWISE 6.245 ms`, `113 DEPTHWISE 6.203 ms`, first conv `003 CONV2D 5.835 ms`, and `012 CONV2D 5.648 ms`.
+    - Current 4-core tracked profile sanity: acquisition `307.137 ms`; sample `9.194 ms`; landmarker `113.375 ms`; tracked frame `123.035 ms`; `8.128 FPS`; amortized `135.832 ms` / `7.362 FPS`.
+  - Fresh-context review said this was not a duplicate of the rejected 3x3 quad experiment, but warned to keep it isolated to standalone `5x5 stride1 SAME`, preserve checked borders/tails, and retain only with same-run tracked-frame improvement and exact JSON.
+  - Runtime changes in `scripts/pose_neon_runtime.c`:
+    - Added AArch64 `fmaq8_depthwise_5x5_quad_row` and `fmaq4_depthwise_5x5_quad_row` helpers.
+    - `depthwise_5x5s1_same_rows` now processes four adjacent interior output columns first, then falls back to the existing two-column path and single-column tail.
+    - Dispatch remains guarded by the existing standalone 5x5 SAME conditions: `kh=kw=5`, stride 1, dilation 1, `depth_multiplier=1`, `padding==0`, and equal input/output H/W. Borders still use `depthwise_5x5_checked_pixel`; fused `PAD->DEPTHWISE`, stride-2, non-5x5, and non-SAME paths are unchanged.
+  - Local correctness command:
+    - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_dw5quad_local -lm -pthread && ...`
+    - Local non-AArch64 raw tensor diffs stayed in the usual range: detector tensor 441 `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+  - Pi op-level A/B was mixed, so retention was decided by integrated tracked-frame A/B:
+    - Landmarker repeated `bench-op`, old vs quad:
+      - op `058`: 2 workers `7.167 -> 6.023 ms`; 3 workers `5.235 -> 5.447 ms`; 4 workers `4.305 -> 4.443 ms`.
+      - op `123`: 2 workers `5.353 -> 4.292 ms`; 3 workers `4.472 -> 3.555 ms`; 4 workers `4.761 -> 2.944 ms`.
+      - op `113`: 2 workers `4.985 -> 4.271 ms`; 3 workers `4.072 -> 3.970 ms`; 4 workers `3.005 -> 4.419 ms`.
+      - op `032`: 2 workers `8.480 -> 8.253 ms`; 3 workers `6.653 -> 7.116 ms`; 4 workers `6.822 -> 6.461 ms`.
+      - op `006`: slight regression in all modes (`5.912 -> 6.030 ms`, `4.773 -> 4.903 ms`, `3.755 -> 3.839 ms`).
+    - Detector repeated `bench-op`, old vs quad:
+      - op `053`: 2 workers `10.676 -> 8.890 ms`; 3 workers `8.557 -> 7.100 ms`; 4 workers `7.705 -> 7.823 ms`.
+      - op `119`: 2 workers `10.706 -> 9.757 ms`; 3 workers `9.415 -> 8.216 ms`; 4 workers `8.046 -> 6.300 ms`.
+      - op `131`: 2 workers `9.833 -> 9.816 ms`; 3 workers `9.336 -> 8.854 ms`; 4 workers `7.466 -> 7.609 ms`.
+  - Pi tracked A/B, `pipeline-rgb-track out/human-for-pose.rgb 514 994`, `reps=48`, `refresh_interval=0`, old default vs quad:
+    - Repeat 1:
+      - 2 workers: `151.529 -> 147.751 ms` tracked frame, `6.599 -> 6.768 FPS`.
+      - 3 workers: `123.868 -> 123.180 ms`, `8.073 -> 8.118 FPS`.
+      - 4 workers: `121.831 -> 119.366 ms`, `8.208 -> 8.378 FPS`.
+    - Repeat 2:
+      - 2 workers: `151.306 -> 147.131 ms`, `6.609 -> 6.797 FPS`.
+      - 3 workers: `124.826 -> 120.996 ms`, `8.011 -> 8.265 FPS`.
+      - 4 workers: `120.010 -> 119.040 ms`, `8.333 -> 8.401 FPS`.
+    - Exported tracked JSON matched exactly in every repeat and worker mode: `0.0` max abs diff over 355 numeric fields.
+  - Final default binary refresh:
+    - Rebuilt with `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_ofast`, copied to the Pi over LAN SSH, and ran raw tensor plus tracked smoke.
+    - Final Pi raw tensor check stayed unchanged: detector tensor 441 `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+    - Final 4-core tracked smoke, `reps=32`, `refresh_interval=0`: acquisition `259.861 ms`; sample `9.275 ms`; landmarker `110.225 ms`; tracked frame `120.012 ms`; `8.333 FPS`; amortized `128.133 ms` / `7.804 FPS`.
+  - Interpretation:
+    - This is retained because integrated tracked-frame timing improved in all requested NEON worker modes across repeated A/B, while final JSON and raw tensor diffs stayed stable.
+    - Isolated op timings remain mixed; future depthwise work should continue to require tracked-frame proof rather than retaining operator-only wins.

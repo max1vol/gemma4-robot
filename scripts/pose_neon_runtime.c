@@ -464,6 +464,116 @@ static inline void fmaq4_depthwise_5x5_pair_row(
   *a = vfmaq_f32(*a, p4, w4);
   *b = vfmaq_f32(*b, p5, w4);
 }
+
+static inline void fmaq8_depthwise_5x5_quad_row(
+    float32x4_t* a0, float32x4_t* a1, float32x4_t* b0, float32x4_t* b1,
+    float32x4_t* c0, float32x4_t* c1, float32x4_t* d0, float32x4_t* d1,
+    const float* row, const float* wrow, int c) {
+  float32x4_t p00 = vld1q_f32(row);
+  float32x4_t p01 = vld1q_f32(row + 4);
+  float32x4_t p10 = vld1q_f32(row + c);
+  float32x4_t p11 = vld1q_f32(row + c + 4);
+  float32x4_t p20 = vld1q_f32(row + 2 * c);
+  float32x4_t p21 = vld1q_f32(row + 2 * c + 4);
+  float32x4_t p30 = vld1q_f32(row + 3 * c);
+  float32x4_t p31 = vld1q_f32(row + 3 * c + 4);
+  float32x4_t p40 = vld1q_f32(row + 4 * c);
+  float32x4_t p41 = vld1q_f32(row + 4 * c + 4);
+  float32x4_t p50 = vld1q_f32(row + 5 * c);
+  float32x4_t p51 = vld1q_f32(row + 5 * c + 4);
+  float32x4_t p60 = vld1q_f32(row + 6 * c);
+  float32x4_t p61 = vld1q_f32(row + 6 * c + 4);
+  float32x4_t p70 = vld1q_f32(row + 7 * c);
+  float32x4_t p71 = vld1q_f32(row + 7 * c + 4);
+  float32x4_t w00 = vld1q_f32(wrow);
+  float32x4_t w01 = vld1q_f32(wrow + 4);
+  float32x4_t w10 = vld1q_f32(wrow + c);
+  float32x4_t w11 = vld1q_f32(wrow + c + 4);
+  float32x4_t w20 = vld1q_f32(wrow + 2 * c);
+  float32x4_t w21 = vld1q_f32(wrow + 2 * c + 4);
+  float32x4_t w30 = vld1q_f32(wrow + 3 * c);
+  float32x4_t w31 = vld1q_f32(wrow + 3 * c + 4);
+  float32x4_t w40 = vld1q_f32(wrow + 4 * c);
+  float32x4_t w41 = vld1q_f32(wrow + 4 * c + 4);
+  *a0 = vfmaq_f32(*a0, p00, w00);
+  *a1 = vfmaq_f32(*a1, p01, w01);
+  *b0 = vfmaq_f32(*b0, p10, w00);
+  *b1 = vfmaq_f32(*b1, p11, w01);
+  *c0 = vfmaq_f32(*c0, p20, w00);
+  *c1 = vfmaq_f32(*c1, p21, w01);
+  *d0 = vfmaq_f32(*d0, p30, w00);
+  *d1 = vfmaq_f32(*d1, p31, w01);
+  *a0 = vfmaq_f32(*a0, p10, w10);
+  *a1 = vfmaq_f32(*a1, p11, w11);
+  *b0 = vfmaq_f32(*b0, p20, w10);
+  *b1 = vfmaq_f32(*b1, p21, w11);
+  *c0 = vfmaq_f32(*c0, p30, w10);
+  *c1 = vfmaq_f32(*c1, p31, w11);
+  *d0 = vfmaq_f32(*d0, p40, w10);
+  *d1 = vfmaq_f32(*d1, p41, w11);
+  *a0 = vfmaq_f32(*a0, p20, w20);
+  *a1 = vfmaq_f32(*a1, p21, w21);
+  *b0 = vfmaq_f32(*b0, p30, w20);
+  *b1 = vfmaq_f32(*b1, p31, w21);
+  *c0 = vfmaq_f32(*c0, p40, w20);
+  *c1 = vfmaq_f32(*c1, p41, w21);
+  *d0 = vfmaq_f32(*d0, p50, w20);
+  *d1 = vfmaq_f32(*d1, p51, w21);
+  *a0 = vfmaq_f32(*a0, p30, w30);
+  *a1 = vfmaq_f32(*a1, p31, w31);
+  *b0 = vfmaq_f32(*b0, p40, w30);
+  *b1 = vfmaq_f32(*b1, p41, w31);
+  *c0 = vfmaq_f32(*c0, p50, w30);
+  *c1 = vfmaq_f32(*c1, p51, w31);
+  *d0 = vfmaq_f32(*d0, p60, w30);
+  *d1 = vfmaq_f32(*d1, p61, w31);
+  *a0 = vfmaq_f32(*a0, p40, w40);
+  *a1 = vfmaq_f32(*a1, p41, w41);
+  *b0 = vfmaq_f32(*b0, p50, w40);
+  *b1 = vfmaq_f32(*b1, p51, w41);
+  *c0 = vfmaq_f32(*c0, p60, w40);
+  *c1 = vfmaq_f32(*c1, p61, w41);
+  *d0 = vfmaq_f32(*d0, p70, w40);
+  *d1 = vfmaq_f32(*d1, p71, w41);
+}
+
+static inline void fmaq4_depthwise_5x5_quad_row(
+    float32x4_t* a, float32x4_t* b, float32x4_t* cacc, float32x4_t* d,
+    const float* row, const float* wrow, int c) {
+  float32x4_t p0 = vld1q_f32(row);
+  float32x4_t p1 = vld1q_f32(row + c);
+  float32x4_t p2 = vld1q_f32(row + 2 * c);
+  float32x4_t p3 = vld1q_f32(row + 3 * c);
+  float32x4_t p4 = vld1q_f32(row + 4 * c);
+  float32x4_t p5 = vld1q_f32(row + 5 * c);
+  float32x4_t p6 = vld1q_f32(row + 6 * c);
+  float32x4_t p7 = vld1q_f32(row + 7 * c);
+  float32x4_t w0 = vld1q_f32(wrow);
+  float32x4_t w1 = vld1q_f32(wrow + c);
+  float32x4_t w2 = vld1q_f32(wrow + 2 * c);
+  float32x4_t w3 = vld1q_f32(wrow + 3 * c);
+  float32x4_t w4 = vld1q_f32(wrow + 4 * c);
+  *a = vfmaq_f32(*a, p0, w0);
+  *b = vfmaq_f32(*b, p1, w0);
+  *cacc = vfmaq_f32(*cacc, p2, w0);
+  *d = vfmaq_f32(*d, p3, w0);
+  *a = vfmaq_f32(*a, p1, w1);
+  *b = vfmaq_f32(*b, p2, w1);
+  *cacc = vfmaq_f32(*cacc, p3, w1);
+  *d = vfmaq_f32(*d, p4, w1);
+  *a = vfmaq_f32(*a, p2, w2);
+  *b = vfmaq_f32(*b, p3, w2);
+  *cacc = vfmaq_f32(*cacc, p4, w2);
+  *d = vfmaq_f32(*d, p5, w2);
+  *a = vfmaq_f32(*a, p3, w3);
+  *b = vfmaq_f32(*b, p4, w3);
+  *cacc = vfmaq_f32(*cacc, p5, w3);
+  *d = vfmaq_f32(*d, p6, w3);
+  *a = vfmaq_f32(*a, p4, w4);
+  *b = vfmaq_f32(*b, p5, w4);
+  *cacc = vfmaq_f32(*cacc, p6, w4);
+  *d = vfmaq_f32(*d, p7, w4);
+}
 #endif
 
 static int same_pad_before(int in, int out, int stride, int kernel, int dilation) {
@@ -1857,6 +1967,102 @@ static void depthwise_5x5s1_same_rows(
     depthwise_5x5_checked_pixel(input, weights, bias, output, y, 1, h, w, c, activation);
     int x = 2;
 #if defined(__aarch64__)
+    for (; x + 3 < w - 2; x += 4) {
+      float* dst0 = output + ((size_t)y * w + x) * c;
+      float* dst1 = dst0 + c;
+      float* dst2 = dst1 + c;
+      float* dst3 = dst2 + c;
+      const float* base = input + ((size_t)(y - 2) * w + x - 2) * c;
+      int ch = 0;
+      for (; ch + 8 <= c; ch += 8) {
+        float32x4_t a0 = vld1q_f32(bias + ch);
+        float32x4_t a1 = vld1q_f32(bias + ch + 4);
+        float32x4_t b0 = a0;
+        float32x4_t b1 = a1;
+        float32x4_t c0 = a0;
+        float32x4_t c1 = a1;
+        float32x4_t d0 = a0;
+        float32x4_t d1 = a1;
+        for (int ky = 0; ky < 5; ++ky) {
+          fmaq8_depthwise_5x5_quad_row(
+              &a0, &a1, &b0, &b1, &c0, &c1, &d0, &d1,
+              base + (size_t)ky * w * c + ch,
+              weights + (size_t)ky * 5 * c + ch,
+              c);
+        }
+        a0 = activateq(a0, activation);
+        a1 = activateq(a1, activation);
+        b0 = activateq(b0, activation);
+        b1 = activateq(b1, activation);
+        c0 = activateq(c0, activation);
+        c1 = activateq(c1, activation);
+        d0 = activateq(d0, activation);
+        d1 = activateq(d1, activation);
+        vst1q_f32(dst0 + ch, a0);
+        vst1q_f32(dst0 + ch + 4, a1);
+        vst1q_f32(dst1 + ch, b0);
+        vst1q_f32(dst1 + ch + 4, b1);
+        vst1q_f32(dst2 + ch, c0);
+        vst1q_f32(dst2 + ch + 4, c1);
+        vst1q_f32(dst3 + ch, d0);
+        vst1q_f32(dst3 + ch + 4, d1);
+      }
+      for (; ch + 4 <= c; ch += 4) {
+        float32x4_t a = vld1q_f32(bias + ch);
+        float32x4_t b = a;
+        float32x4_t cacc = a;
+        float32x4_t d = a;
+        for (int ky = 0; ky < 5; ++ky) {
+          fmaq4_depthwise_5x5_quad_row(
+              &a, &b, &cacc, &d,
+              base + (size_t)ky * w * c + ch,
+              weights + (size_t)ky * 5 * c + ch,
+              c);
+        }
+        a = activateq(a, activation);
+        b = activateq(b, activation);
+        cacc = activateq(cacc, activation);
+        d = activateq(d, activation);
+        vst1q_f32(dst0 + ch, a);
+        vst1q_f32(dst1 + ch, b);
+        vst1q_f32(dst2 + ch, cacc);
+        vst1q_f32(dst3 + ch, d);
+      }
+      for (; ch < c; ++ch) {
+        float a = bias[ch];
+        float b = bias[ch];
+        float cacc = bias[ch];
+        float d = bias[ch];
+        for (int ky = 0; ky < 5; ++ky) {
+          const float* row = base + (size_t)ky * w * c;
+          const float* wrow = weights + (size_t)ky * 5 * c;
+          a += row[ch] * wrow[ch];
+          b += row[c + ch] * wrow[ch];
+          cacc += row[2 * c + ch] * wrow[ch];
+          d += row[3 * c + ch] * wrow[ch];
+          a += row[c + ch] * wrow[c + ch];
+          b += row[2 * c + ch] * wrow[c + ch];
+          cacc += row[3 * c + ch] * wrow[c + ch];
+          d += row[4 * c + ch] * wrow[c + ch];
+          a += row[2 * c + ch] * wrow[2 * c + ch];
+          b += row[3 * c + ch] * wrow[2 * c + ch];
+          cacc += row[4 * c + ch] * wrow[2 * c + ch];
+          d += row[5 * c + ch] * wrow[2 * c + ch];
+          a += row[3 * c + ch] * wrow[3 * c + ch];
+          b += row[4 * c + ch] * wrow[3 * c + ch];
+          cacc += row[5 * c + ch] * wrow[3 * c + ch];
+          d += row[6 * c + ch] * wrow[3 * c + ch];
+          a += row[4 * c + ch] * wrow[4 * c + ch];
+          b += row[5 * c + ch] * wrow[4 * c + ch];
+          cacc += row[6 * c + ch] * wrow[4 * c + ch];
+          d += row[7 * c + ch] * wrow[4 * c + ch];
+        }
+        dst0[ch] = activate(a, activation);
+        dst1[ch] = activate(b, activation);
+        dst2[ch] = activate(cacc, activation);
+        dst3[ch] = activate(d, activation);
+      }
+    }
     for (; x + 1 < w - 2; x += 2) {
       float* dst0 = output + ((size_t)y * w + x) * c;
       float* dst1 = dst0 + c;

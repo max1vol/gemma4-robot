@@ -360,6 +360,39 @@ End-to-end graph executor status:
     - Interpretation:
       - For a static in-frame subject, periodic detector refresh only lowers amortized FPS, as expected. The production policy should be: update ROI every frame from landmarks, reacquire on low presence/invalid rect, and use rare periodic refresh only as a robustness knob.
       - The useful camera-facing performance target is now explicit: with detector every 32 tracked frames, the current runtime is about `7.5 FPS` on 4 cores and `7.2 FPS` on 3 cores on this Pi/sample; with one initial detector acquisition and no periodic refresh it is about `7.6 FPS` on 4 cores and `7.5 FPS` on 3 cores over 64 repeated frames.
+  - 2026-05-16 retained two-output first RGB stride-2 conv kernel:
+    - Fresh Pi profile before editing:
+      - Command: `tailscale ssh max@pi3 'cd ~/gemma4-robot && ... POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast ... detector ... && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast ... landmarker ... && ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track ... 4 12 0'`.
+      - Detector totals: CONV2D `142.8 ms`, DEPTHWISE `88.6 ms`; top op was detector `204 CONV2D 15.8 ms`, with detector first conv `003` still benchmarkable as `PAD+CONV2D`.
+      - Landmarker totals: CONV2D `78.8 ms`, DEPTHWISE `66.7 ms`; landmarker first conv `003 CONV2D` was `13.0 ms` in the profiled run.
+      - Tracked 4-core run in that profile command: acquisition `310.0 ms`, sample `9.0 ms`, landmarker `117.6 ms`, tracked frame `128.1 ms`, `7.80 FPS`.
+    - Runtime change:
+      - Added an AArch64 interior-pair fast path for the fused `PAD -> 3x3 stride-2 RGB -> 24 channel` first-conv path in `scripts/pose_neon_runtime.c`.
+      - The new helper computes two adjacent horizontal output pixels at once, keeps two 24-channel accumulator sets, and reuses each loaded weight vector for both outputs.
+      - Border pixels and odd tails still use the existing checked single-output path, so padding semantics stay unchanged.
+      - This follows a fresh-context subagent suggestion and targets weight reload overhead in the first RGB conv, not the previously rejected residual-add or PAD->DEPTHWISE branch-hoist paths.
+    - Local correctness smoke:
+      - `git diff --check && cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_rgbpair_local -lm -pthread && ...`
+      - Detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+      - Landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.85882429e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49011612e-05`.
+    - Pi isolated op benchmark, 4 threads, `reps=30`, `warmup=3`, previous default vs pair kernel:
+      - Detector `src_op=003 PAD+CONV2D`: `4.327700 ms` -> `3.972645 ms`.
+      - Landmarker `src_op=003 PAD+CONV2D`: `6.129262 ms` -> `4.326426 ms`.
+    - Pi raw-model correctness and timing:
+      - New binary raw correctness stayed unchanged: detector tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.85882429e-14`, tensor 283 `5.188e-4`, tensor 312 `1.3589859e-05`.
+      - 4-core raw model A/B, `reps=5`: detector `236.0 ms` -> `237.3 ms` (flat/noisy), landmarker `144.8 ms` -> `116.8 ms`.
+    - Pi tracked-frame A/B on `out/human-for-pose.rgb`, no detector refresh:
+      - 2 threads, `reps=48`: `157.4 ms`, `6.35 FPS` -> `153.6 ms`, `6.51 FPS`.
+      - 3 threads, `reps=48`: `127.9 ms`, `7.82 FPS` -> `126.0 ms`, `7.94 FPS`.
+      - 4 threads, `reps=64`: `124.4 ms`, `8.04 FPS` -> `122.4 ms`, `8.17 FPS`.
+      - Exported JSON numeric values matched exactly for the 2/3/4-thread long comparisons (`0.0` max absolute difference across 355 numeric fields).
+    - Final default binary refresh:
+      - Rebuilt with `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_ofast` and copied it to the Pi.
+      - Final raw 4-core check, `reps=3`: detector `237.0 ms`; landmarker `112.6 ms`; raw tensor diffs unchanged.
+      - Final tracked 4-core sanity, `reps=32`: acquisition `251.8 ms`; sample `9.25 ms`; landmarker `112.9 ms`; tracked frame `123.6 ms`; `8.09 FPS`; amortized over 32 frames `131.5 ms` / `7.61 FPS`.
+    - Interpretation:
+      - This is a retained narrow kernel improvement because it improves the targeted first-conv op and improves repeated tracked frames in all requested NEON worker modes while preserving output equivalence.
+      - The next measured opportunity is likely the ROI sampler (`sample_rotated_rect_rgb` is still about `9 ms` per tracked frame) or another fixed-shape depthwise/pointwise head selected from a fresh profile.
 
 Persistent thread-pool prefix runner:
 

@@ -773,6 +773,79 @@ static void conv2d_3x3s2_rgb24_packed(
 #endif
 }
 
+#if defined(__aarch64__)
+static inline void conv2d_3x3s2_rgb24_pair_interior(
+    const float* base, const float* weights, const float* bias,
+    float* dst0, float* dst1, int in_w, int activation) {
+  float32x4_t a0 = vld1q_f32(bias + 0);
+  float32x4_t a1 = vld1q_f32(bias + 4);
+  float32x4_t a2 = vld1q_f32(bias + 8);
+  float32x4_t a3 = vld1q_f32(bias + 12);
+  float32x4_t a4 = vld1q_f32(bias + 16);
+  float32x4_t a5 = vld1q_f32(bias + 20);
+  float32x4_t b0 = a0;
+  float32x4_t b1 = a1;
+  float32x4_t b2 = a2;
+  float32x4_t b3 = a3;
+  float32x4_t b4 = a4;
+  float32x4_t b5 = a5;
+  for (int ky = 0; ky < 3; ++ky) {
+    const float* row = base + (size_t)ky * in_w * 3;
+    for (int kx = 0; kx < 3; ++kx) {
+      const float* src0 = row + kx * 3;
+      const float* src1 = src0 + 2 * 3;
+      for (int ci = 0; ci < 3; ++ci) {
+        const float* wv = weights + ((ky * 3 + kx) * 3 + ci) * 24;
+        float32x4_t w0 = vld1q_f32(wv + 0);
+        float32x4_t w1 = vld1q_f32(wv + 4);
+        float32x4_t w2 = vld1q_f32(wv + 8);
+        float32x4_t w3 = vld1q_f32(wv + 12);
+        float32x4_t w4 = vld1q_f32(wv + 16);
+        float32x4_t w5 = vld1q_f32(wv + 20);
+        float v0 = src0[ci];
+        float v1 = src1[ci];
+        a0 = vfmaq_n_f32(a0, w0, v0);
+        a1 = vfmaq_n_f32(a1, w1, v0);
+        a2 = vfmaq_n_f32(a2, w2, v0);
+        a3 = vfmaq_n_f32(a3, w3, v0);
+        a4 = vfmaq_n_f32(a4, w4, v0);
+        a5 = vfmaq_n_f32(a5, w5, v0);
+        b0 = vfmaq_n_f32(b0, w0, v1);
+        b1 = vfmaq_n_f32(b1, w1, v1);
+        b2 = vfmaq_n_f32(b2, w2, v1);
+        b3 = vfmaq_n_f32(b3, w3, v1);
+        b4 = vfmaq_n_f32(b4, w4, v1);
+        b5 = vfmaq_n_f32(b5, w5, v1);
+      }
+    }
+  }
+  a0 = activateq(a0, activation);
+  a1 = activateq(a1, activation);
+  a2 = activateq(a2, activation);
+  a3 = activateq(a3, activation);
+  a4 = activateq(a4, activation);
+  a5 = activateq(a5, activation);
+  b0 = activateq(b0, activation);
+  b1 = activateq(b1, activation);
+  b2 = activateq(b2, activation);
+  b3 = activateq(b3, activation);
+  b4 = activateq(b4, activation);
+  b5 = activateq(b5, activation);
+  vst1q_f32(dst0 + 0, a0);
+  vst1q_f32(dst0 + 4, a1);
+  vst1q_f32(dst0 + 8, a2);
+  vst1q_f32(dst0 + 12, a3);
+  vst1q_f32(dst0 + 16, a4);
+  vst1q_f32(dst0 + 20, a5);
+  vst1q_f32(dst1 + 0, b0);
+  vst1q_f32(dst1 + 4, b1);
+  vst1q_f32(dst1 + 8, b2);
+  vst1q_f32(dst1 + 12, b3);
+  vst1q_f32(dst1 + 16, b4);
+  vst1q_f32(dst1 + 20, b5);
+}
+#endif
+
 static void conv2d_3x3s2_rgb24_from_pad_packed(
     const float* input, const int32_t* pads, const float* weights, const float* bias, float* output,
     int y0, int y1, int in_h, int in_w, int out_w, int activation) {
@@ -782,7 +855,79 @@ static void conv2d_3x3s2_rgb24_from_pad_packed(
   for (int oy = y0; oy < y1; ++oy) {
     int py0 = oy * 2;
     int interior_y = py0 >= top && py0 + 3 <= top + in_h;
-    for (int ox = 0; ox < out_w; ++ox) {
+    int ox = 0;
+    for (; ox + 1 < out_w;) {
+      int px0 = ox * 2;
+      if (interior_y && px0 >= left && px0 + 5 <= left + in_w) {
+        const float* base = input + ((size_t)(py0 - top) * in_w + (px0 - left)) * 3;
+        float* dst0 = output + ((size_t)oy * out_w + ox) * 24;
+        conv2d_3x3s2_rgb24_pair_interior(
+            base, weights, bias, dst0, dst0 + 24, in_w, activation);
+        ox += 2;
+        continue;
+      }
+      int interior = interior_y && px0 >= left && px0 + 3 <= left + in_w;
+      float32x4_t acc0 = vld1q_f32(bias + 0);
+      float32x4_t acc1 = vld1q_f32(bias + 4);
+      float32x4_t acc2 = vld1q_f32(bias + 8);
+      float32x4_t acc3 = vld1q_f32(bias + 12);
+      float32x4_t acc4 = vld1q_f32(bias + 16);
+      float32x4_t acc5 = vld1q_f32(bias + 20);
+      if (interior) {
+        const float* base = input + ((size_t)(py0 - top) * in_w + (px0 - left)) * 3;
+        for (int ky = 0; ky < 3; ++ky) {
+          const float* row = base + (size_t)ky * in_w * 3;
+          for (int kx = 0; kx < 3; ++kx) {
+            const float* src = row + kx * 3;
+            for (int ci = 0; ci < 3; ++ci) {
+              const float* wv = weights + ((ky * 3 + kx) * 3 + ci) * 24;
+              float v = src[ci];
+              acc0 = vfmaq_n_f32(acc0, vld1q_f32(wv + 0), v);
+              acc1 = vfmaq_n_f32(acc1, vld1q_f32(wv + 4), v);
+              acc2 = vfmaq_n_f32(acc2, vld1q_f32(wv + 8), v);
+              acc3 = vfmaq_n_f32(acc3, vld1q_f32(wv + 12), v);
+              acc4 = vfmaq_n_f32(acc4, vld1q_f32(wv + 16), v);
+              acc5 = vfmaq_n_f32(acc5, vld1q_f32(wv + 20), v);
+            }
+          }
+        }
+      } else {
+        for (int ky = 0; ky < 3; ++ky) {
+          int iy = py0 + ky - top;
+          if ((unsigned)iy >= (unsigned)in_h) continue;
+          for (int kx = 0; kx < 3; ++kx) {
+            int ix = px0 + kx - left;
+            if ((unsigned)ix >= (unsigned)in_w) continue;
+            const float* src = input + ((size_t)iy * in_w + ix) * 3;
+            for (int ci = 0; ci < 3; ++ci) {
+              const float* wv = weights + ((ky * 3 + kx) * 3 + ci) * 24;
+              float v = src[ci];
+              acc0 = vfmaq_n_f32(acc0, vld1q_f32(wv + 0), v);
+              acc1 = vfmaq_n_f32(acc1, vld1q_f32(wv + 4), v);
+              acc2 = vfmaq_n_f32(acc2, vld1q_f32(wv + 8), v);
+              acc3 = vfmaq_n_f32(acc3, vld1q_f32(wv + 12), v);
+              acc4 = vfmaq_n_f32(acc4, vld1q_f32(wv + 16), v);
+              acc5 = vfmaq_n_f32(acc5, vld1q_f32(wv + 20), v);
+            }
+          }
+        }
+      }
+      acc0 = activateq(acc0, activation);
+      acc1 = activateq(acc1, activation);
+      acc2 = activateq(acc2, activation);
+      acc3 = activateq(acc3, activation);
+      acc4 = activateq(acc4, activation);
+      acc5 = activateq(acc5, activation);
+      float* dst = output + ((size_t)oy * out_w + ox) * 24;
+      vst1q_f32(dst + 0, acc0);
+      vst1q_f32(dst + 4, acc1);
+      vst1q_f32(dst + 8, acc2);
+      vst1q_f32(dst + 12, acc3);
+      vst1q_f32(dst + 16, acc4);
+      vst1q_f32(dst + 20, acc5);
+      ox++;
+    }
+    for (; ox < out_w; ++ox) {
       int px0 = ox * 2;
       int interior = interior_y && px0 >= left && px0 + 3 <= left + in_w;
       float32x4_t acc0 = vld1q_f32(bias + 0);

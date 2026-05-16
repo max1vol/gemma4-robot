@@ -1145,3 +1145,19 @@ End-to-end NEON reference path:
   - Interpretation:
     - This is retained because integrated tracked-frame timing improved in all requested NEON worker modes across repeated A/B, while final JSON and raw tensor diffs stayed stable.
     - Isolated op timings remain mixed; future depthwise work should continue to require tracked-frame proof rather than retaining operator-only wins.
+
+- 2026-05-16 rejected 5x5 quad high-channel gating:
+  - Motivation:
+    - The retained quad-column 5x5 path had mixed isolated op results. A narrow follow-up tried using the quad path only for `c >= 192`, falling back to the retained two-column path for lower-channel 5x5 SAME ops such as landmarker `058` (`c=144`).
+  - Local validation:
+    - Built with `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_dw5quad_gate_local -lm -pthread`.
+    - Local raw tensor diffs stayed in the usual range: detector tensor 441 `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+  - Pi op-level A/B against the retained quad-all default was mixed to worse:
+    - Landmarker `058` regressed in all modes in that run: 2 workers `5.826 -> 6.806 ms`, 3 workers `4.915 -> 4.995 ms`, 4 workers `4.165 -> 5.702 ms`.
+    - Landmarker `123` improved only at 4 workers (`4.291 -> 2.700 ms`) but regressed at 2/3 workers; `113` was mixed; detector `053/119/131` were also mixed.
+  - Pi tracked A/B, `pipeline-rgb-track`, `reps=32`, `refresh_interval=0`, retained quad-all vs gated:
+    - 2 workers: `148.080 -> 148.264 ms`.
+    - 3 workers: `121.391 -> 121.895 ms`.
+    - 4 workers: `120.338 -> 121.474 ms`.
+    - Exported JSON stayed exact (`0.0` max abs over 355 numeric fields), but performance regressed/flattened.
+  - Reverted. The retained quad-all dispatch remains better for the integrated tracked path.

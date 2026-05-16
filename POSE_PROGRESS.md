@@ -356,3 +356,47 @@ End-to-end NEON reference path:
   - Interpretation:
     - The current pure NEON camera strategy is now implemented, not just estimated: run detector for acquisition/reacquire, then use auxiliary-landmark rect tracking for landmarker-only frames.
     - On this loaded Pi 3B+, this reaches `5.17 FPS` on 4 cores and `4.69 FPS` on 3 cores for tracked frames from the sample image. The remaining gap to the earlier theoretical `~6 FPS` target is now mostly landmarker CONV2D/DEPTHWISE kernel speed and RGB ROI sampling cost.
+
+- 2026-05-16 NEON tracked-frame optimization pass:
+  - Targeted the measured tracked-camera frame bottleneck: landmarker inference plus rotated RGB ROI sampling.
+  - Runtime changes in `scripts/pose_neon_runtime.c`:
+    - Added AArch64 helper intrinsics for 8-channel depthwise FMA tiles (`fmaq8_at`) while retaining 4-channel/scalar tails.
+    - Updated depthwise paths to process channels in blocks of 8 when possible: checked 3x3 border pixels, 3x3 stride-1 SAME interior, generic VALID depthwise, fused PAD->DEPTHWISE, and the generic SAME fallback.
+    - Reworked `sample_rotated_rect_rgb` to use affine stepping across each row instead of recomputing the rotated transform for every output pixel.
+  - Build commands:
+    - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime -lm`
+    - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o out/pose_neon_runtime_aarch64_ofast -lm -pthread'`
+  - Local pipeline sanity:
+    - `/tmp/pose_neon_runtime pipeline-rgb out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-for-pose-neon-c-pipeline-new.json 4 1`
+    - `/tmp/pose_neon_runtime pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-for-pose-neon-c-pipeline-track-new.json 4 10`
+    - The full C pipeline still produced `pose_count=1`.
+    - New full-pipeline landmarks vs the previous committed C full-pipeline output changed only at sampler float-order scale: max x `1.10e-5`, max y `2.22e-5`, max z `2.63e-4`.
+  - Copied to Pi and ran raw correctness plus tracked benchmark:
+    - `tar -cf - out/pose_neon_runtime_aarch64_ofast | tailscale ssh max@pi3 'cd ~/gemma4-robot && tar -xf - && chmod +x out/pose_neon_runtime_aarch64_ofast && rm -rf /tmp/pose-det-new /tmp/pose-lm-new && mkdir -p /tmp/pose-det-new /tmp/pose-lm-new && ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-new 4 3 out/pose_runtime_test_detector/ref && ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-new 4 3 out/pose_runtime_test_noseg/ref && for t in 2 3 4; do ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-for-pose-neon-c-pipeline-track-new-t$t.json $t 10; done'`
+    - Correctness remained unchanged against LiteRT raw tensor references:
+      - detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.204e-4`.
+      - landmarker tensor 310 max abs `8.278e-3`, tensor 315 max abs `2.86e-14`, tensor 283 max abs `5.188e-4`, tensor 312 max abs `1.36e-5`.
+    - Tracked camera-path timings, `reps=10`:
+      - 2 cores: acquisition `669.704 ms`; sample `9.013 ms`; landmarker `221.527 ms`; tracked frame `232.100 ms`; `4.308 FPS`.
+      - 3 cores: acquisition `497.076 ms`; sample `9.036 ms`; landmarker `175.280 ms`; tracked frame `185.872 ms`; `5.380 FPS`.
+      - 4 cores: acquisition `453.584 ms`; sample `9.196 ms`; landmarker `159.281 ms`; tracked frame `170.087 ms`; `5.879 FPS`.
+    - Compared with the previous tracked benchmark from the same sample:
+      - 4-core tracked frame improved from `193.457 ms` / `5.169 FPS` to `170.087 ms` / `5.879 FPS`.
+      - 3-core tracked frame improved from `213.228 ms` / `4.690 FPS` to `185.872 ms` / `5.380 FPS`.
+      - ROI sampling improved from about `14 ms` to about `9 ms` on Pi.
+  - Re-ran raw model timings on Pi with `reps=5` for all requested NEON worker counts:
+    - 2 cores: detector `668.715 ms`, landmarker `226.484 ms`, combined raw `895.199 ms` (`1.12 FPS`).
+    - 3 cores: detector `441.926 ms`, landmarker `180.705 ms`, combined raw `622.631 ms` (`1.61 FPS`).
+    - 4 cores: detector `402.781 ms`, landmarker `163.532 ms`, combined raw `566.313 ms` (`1.77 FPS`).
+  - Re-ran full detector-every-frame pipeline on Pi with `reps=5`:
+    - 2 cores: detector `621.294 ms`, landmarker `226.207 ms`, frame `866.904 ms`, `1.154 FPS`.
+    - 3 cores: detector `461.814 ms`, landmarker `177.183 ms`, frame `657.880 ms`, `1.520 FPS`.
+    - 4 cores: detector `406.368 ms`, landmarker `174.890 ms`, frame `600.974 ms`, `1.664 FPS`.
+  - Fetched the new Pi 4-core tracking JSON and compared against official MediaPipe output:
+    - `pose_count=1`, `pose_presence=0.995636642`.
+    - selected rect `{x_center:0.549493849,y_center:0.460266829,width:2.27443814,height:1.1761179,rotation:-0.0179902315}`.
+    - next rect `{x_center:0.551523387,y_center:0.459532052,width:2.28196335,height:1.18000913,rotation:-0.0342178345}`.
+    - final pose landmarks vs official MediaPipe: max abs x `0.02142`, y `0.00680`, z `0.22151`; mean abs x `0.00522`, y `0.00283`, z `0.07442`.
+  - Interpretation:
+    - The pure NEON tracked camera path is now within about 2% of the earlier theoretical `~6 FPS` target on 4 cores and exceeds 5 FPS on 3 cores.
+    - The next model-compute target is still pointwise CONV2D. Depthwise improved enough that the remaining large raw buckets are detector/landmarker pointwise convolutions and detector acquisition latency.

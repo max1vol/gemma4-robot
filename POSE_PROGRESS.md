@@ -523,3 +523,22 @@ End-to-end NEON reference path:
     - Raw timings were noisy because of current Pi load/throttling, but the repeated tensor comparisons remained unchanged. The retained change is small, model-local, and directionally useful for the real tracked camera path.
     - Fresh-context review agreed the paired-pixel tap order and bounds are correct, and warned that more small depthwise variants would become low-value unless tied to a clearly profiled stride-2 target.
     - Next higher-leverage work is still pointwise A53-specific tuning or a dedicated fixed-shape depthwise implementation for the remaining named hot ops. Avoid more fused `PAD -> DEPTHWISE` branch rearrangement unless measured in isolation.
+
+- 2026-05-16 pointwise A53 experiments that were rejected:
+  - Tried a source-level `6x8` pointwise K-loop unroll by 4 for the hot packed pointwise kernels, including the fused `1x1 CONV2D -> ADD` path.
+    - Local tensor correctness was unchanged: detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`; landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+    - Pi tracked path regressed: 2 cores `211.723 ms` / `4.723 FPS`, 3 cores `164.656 ms` / `6.073 FPS`, 4 cores `158.720 ms` / `6.300 FPS`.
+    - Pi raw timings also regressed versus the retained depthwise checkpoint: 2-core combined raw `621.731 ms`, 3-core `467.448 ms`, 4-core `445.277 ms`.
+    - Reverted. The compiler/A53 path appears register-pressure sensitive; this simple unroll is worse than the compact loop.
+  - Tried forcing `POSE_PW_TILE=4` at build time, so the runtime used the existing `4x8` pointwise path instead of the normal `6x8` tile.
+    - Pi tracked path regressed: 3 cores `172.295 ms` / `5.804 FPS`, 4 cores `152.894 ms` / `6.540 FPS`.
+    - Pi raw timings were also worse for detector: 3-core detector `411.131 ms`, 4-core detector `319.274 ms`.
+    - Rejected. The default `6x8` tile remains better on the current 64-bit Pi 3B+ runtime.
+  - Tried changing pointwise work-item order from pixel-tile-major to output-channel-block-major to improve packed-weight reuse.
+    - Local tensor correctness was unchanged, but Pi performance regressed heavily.
+    - Pi raw timings: 2-core detector `484.724 ms`, landmarker `217.486 ms`; 3-core detector `336.449 ms`, landmarker `172.702 ms`; 4-core detector `318.008 ms`, landmarker `169.824 ms`.
+    - Pi tracked path: 2 cores `219.705 ms` / `4.552 FPS`, 3 cores `177.667 ms` / `5.629 FPS`, 4 cores `167.755 ms` / `5.961 FPS`.
+    - Reverted. For this model and worker pool, keeping the input pixel tile hot across all output-channel blocks is more important than sweeping one weight block across the whole image.
+  - Current conclusion:
+    - The retained pointwise design is still the best measured C/intrinsics implementation so far: `6x8`, pixel-tile-major scheduling, packed output-channel blocks of 8, and graph-level residual fusion.
+    - Next pointwise work should be either a true A53 assembly microkernel based on the XNNPACK 6x8/4x8 kernels, or a dedicated microbenchmark harness that compares variants outside the full model before touching the integrated runtime again.

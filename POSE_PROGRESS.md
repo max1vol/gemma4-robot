@@ -783,3 +783,31 @@ End-to-end NEON reference path:
     - This is a retained model-specific depthwise kernel improvement. It removes per-tap boundary checks and reuses overlapping adjacent-pixel data for common 5x5 stride-1 SAME depthwise ops.
     - It improves all requested tracked NEON worker modes in the recorded A/B run and keeps raw tensor diffs unchanged.
     - Fresh-context review still recommends a faithful local A53 `6x8` pointwise full-block microkernel, especially for fused residual pointwise tiles, as the next high-leverage target. This 5x5 depthwise change was taken because the live profile showed the targeted 5x5 ops were still prominent and the measured A/B moved end-to-end tracked frames.
+
+- 2026-05-16 rejected fused stride-2 depthwise fixed-shape experiment:
+  - Refreshed the current retained binary after `b2ac198`:
+    - Detector totals: `CONV2D 220.705 ms`, `DEPTHWISE 99.484 ms`, `RESIZE_BILINEAR 8.024 ms`; top ops included detector `204 CONV2D 34.907 ms`, `029 DEPTHWISE 9.802 ms`, `003 CONV2D 9.684 ms`, `053 DEPTHWISE 9.370 ms`, `042 DEPTHWISE 8.796 ms`, `119 DEPTHWISE 8.023 ms`, and `131 DEPTHWISE 7.920 ms`.
+    - Landmarker totals: `CONV2D 73.119 ms`, `DEPTHWISE 57.084 ms`, `RESIZE_BILINEAR 2.582 ms`; top ops included landmarker `032 DEPTHWISE 7.954 ms`, `003 CONV2D 7.643 ms`, `049 DEPTHWISE 7.070 ms`, `006 DEPTHWISE 6.236 ms`, `058 DEPTHWISE 5.661 ms`, `012 CONV2D 5.342 ms`.
+    - Tracked 4-core profile run: acquisition `302.487 ms`; sample `9.748 ms`; landmarker `126.349 ms`; tracked frame `137.610 ms`; `7.267 FPS`.
+  - Tried fixed-shape `3x3/5x5 stride2 VALID` depthwise helpers first in the non-fused `op_depthwise_rows` path.
+    - This did not hit the important ops because `bench-op` resolves them as fused `PAD+DEPTHWISE` targets.
+  - Redirected the experiment into `depthwise_from_padded_input_rows` for interior `PAD+DEPTHWISE` pixels, leaving border pixels on the existing checked path.
+  - Local correctness command:
+    - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_dwfuseds2 -lm -pthread && rm -rf /tmp/pose-det-dwfuseds2-local /tmp/pose-lm-dwfuseds2-local && mkdir -p /tmp/pose-det-dwfuseds2-local /tmp/pose-lm-dwfuseds2-local && /tmp/pose_neon_runtime_dwfuseds2 out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-dwfuseds2-local 4 1 out/pose_runtime_test_detector/ref && /tmp/pose_neon_runtime_dwfuseds2 out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-dwfuseds2-local 4 1 out/pose_runtime_test_noseg/ref`
+    - Diffs stayed in the usual range: detector tensor 441 `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+  - Pi fused-op benchmark, old default vs experimental fused stride-2 path, 4 threads, `reps=40`, `warmup=4`:
+    - Detector fused op `018`: old `6.185600 ms`; new `5.510000 ms`.
+    - Detector fused op `042`: old `8.183642 ms`; new `7.517324 ms`.
+    - Landmarker fused op `023`: old `3.415503 ms`; new `3.361362 ms`.
+    - Landmarker fused op `049`: old `7.359824 ms`; new `6.440565 ms`.
+    - Landmarker fused op `140`: old `1.234936 ms`; new `1.168020 ms`.
+  - Pi tracked-frame and raw-model A/B, old default vs experimental:
+    - 2-core tracked, `reps=16`: old `181.737 ms` / `5.502 FPS`; new `180.954 ms` / `5.526 FPS`.
+    - 3-core tracked, `reps=16`: old `149.280 ms` / `6.699 FPS`; new `143.968 ms` / `6.946 FPS`.
+    - 4-core tracked, `reps=16`: old `135.223 ms` / `7.395 FPS`; new `139.615 ms` / `7.163 FPS`.
+    - 4-core raw detector, `reps=3`: old `294.074 ms`; new `291.853 ms`.
+    - 4-core raw landmarker, `reps=3`: old `140.146 ms`; new `142.739 ms`.
+  - Rejected and removed before commit:
+    - The fixed-shape fused-op numbers improved, but the same-run 4-core tracked path regressed and raw landmarker also regressed.
+    - This confirms the current rule: do not retain isolated operator wins unless they also improve tracked-frame timing or a consistently dominant raw-model path.
+    - Fresh-context review again recommended the faithful local Cortex-A53 `6x8` pointwise full-block microkernel, especially for `conv2d_1x1_packed_add_tile` fused residual tiles. Suggested calibration ops are detector standalone `204`, landmarker fused `116->117` and `126->127`, and detector fused `123->124` / `135->136`.

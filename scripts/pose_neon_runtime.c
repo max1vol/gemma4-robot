@@ -322,6 +322,54 @@ static inline void fmaq8_at(
   *acc0 = vfmaq_f32(*acc0, vld1q_f32(src), vld1q_f32(w));
   *acc1 = vfmaq_f32(*acc1, vld1q_f32(src + 4), vld1q_f32(w + 4));
 }
+
+static inline void fmaq8_depthwise_pair_row(
+    float32x4_t* a0, float32x4_t* a1, float32x4_t* b0, float32x4_t* b1,
+    const float* row, const float* wrow, int c) {
+  float32x4_t p00 = vld1q_f32(row);
+  float32x4_t p01 = vld1q_f32(row + 4);
+  float32x4_t p10 = vld1q_f32(row + c);
+  float32x4_t p11 = vld1q_f32(row + c + 4);
+  float32x4_t p20 = vld1q_f32(row + 2 * c);
+  float32x4_t p21 = vld1q_f32(row + 2 * c + 4);
+  float32x4_t p30 = vld1q_f32(row + 3 * c);
+  float32x4_t p31 = vld1q_f32(row + 3 * c + 4);
+  float32x4_t w00 = vld1q_f32(wrow);
+  float32x4_t w01 = vld1q_f32(wrow + 4);
+  float32x4_t w10 = vld1q_f32(wrow + c);
+  float32x4_t w11 = vld1q_f32(wrow + c + 4);
+  float32x4_t w20 = vld1q_f32(wrow + 2 * c);
+  float32x4_t w21 = vld1q_f32(wrow + 2 * c + 4);
+  *a0 = vfmaq_f32(*a0, p00, w00);
+  *a1 = vfmaq_f32(*a1, p01, w01);
+  *b0 = vfmaq_f32(*b0, p10, w00);
+  *b1 = vfmaq_f32(*b1, p11, w01);
+  *a0 = vfmaq_f32(*a0, p10, w10);
+  *a1 = vfmaq_f32(*a1, p11, w11);
+  *b0 = vfmaq_f32(*b0, p20, w10);
+  *b1 = vfmaq_f32(*b1, p21, w11);
+  *a0 = vfmaq_f32(*a0, p20, w20);
+  *a1 = vfmaq_f32(*a1, p21, w21);
+  *b0 = vfmaq_f32(*b0, p30, w20);
+  *b1 = vfmaq_f32(*b1, p31, w21);
+}
+
+static inline void fmaq4_depthwise_pair_row(
+    float32x4_t* a, float32x4_t* b, const float* row, const float* wrow, int c) {
+  float32x4_t p0 = vld1q_f32(row);
+  float32x4_t p1 = vld1q_f32(row + c);
+  float32x4_t p2 = vld1q_f32(row + 2 * c);
+  float32x4_t p3 = vld1q_f32(row + 3 * c);
+  float32x4_t w0 = vld1q_f32(wrow);
+  float32x4_t w1 = vld1q_f32(wrow + c);
+  float32x4_t w2 = vld1q_f32(wrow + 2 * c);
+  *a = vfmaq_f32(*a, p0, w0);
+  *b = vfmaq_f32(*b, p1, w0);
+  *a = vfmaq_f32(*a, p1, w1);
+  *b = vfmaq_f32(*b, p2, w1);
+  *a = vfmaq_f32(*a, p2, w2);
+  *b = vfmaq_f32(*b, p3, w2);
+}
 #endif
 
 static int same_pad_before(int in, int out, int stride, int kernel, int dilation) {
@@ -1181,6 +1229,67 @@ static void depthwise_3x3_checked_pixel(
   }
 }
 
+static inline void depthwise_3x3s1_same_pair(
+    const float* row0, const float* row1, const float* row2,
+    const float* weights, const float* bias, float* dst0, float* dst1,
+    int c, int activation) {
+  int ch = 0;
+#if defined(__aarch64__)
+  for (; ch + 8 <= c; ch += 8) {
+    float32x4_t a0 = vld1q_f32(bias + ch);
+    float32x4_t a1 = vld1q_f32(bias + ch + 4);
+    float32x4_t b0 = a0;
+    float32x4_t b1 = a1;
+    fmaq8_depthwise_pair_row(&a0, &a1, &b0, &b1, row0 + ch, weights + 0 * c + ch, c);
+    fmaq8_depthwise_pair_row(&a0, &a1, &b0, &b1, row1 + ch, weights + 3 * c + ch, c);
+    fmaq8_depthwise_pair_row(&a0, &a1, &b0, &b1, row2 + ch, weights + 6 * c + ch, c);
+    a0 = activateq(a0, activation);
+    a1 = activateq(a1, activation);
+    b0 = activateq(b0, activation);
+    b1 = activateq(b1, activation);
+    vst1q_f32(dst0 + ch, a0);
+    vst1q_f32(dst0 + ch + 4, a1);
+    vst1q_f32(dst1 + ch, b0);
+    vst1q_f32(dst1 + ch + 4, b1);
+  }
+  for (; ch + 4 <= c; ch += 4) {
+    float32x4_t a = vld1q_f32(bias + ch);
+    float32x4_t b = a;
+    fmaq4_depthwise_pair_row(&a, &b, row0 + ch, weights + 0 * c + ch, c);
+    fmaq4_depthwise_pair_row(&a, &b, row1 + ch, weights + 3 * c + ch, c);
+    fmaq4_depthwise_pair_row(&a, &b, row2 + ch, weights + 6 * c + ch, c);
+    a = activateq(a, activation);
+    b = activateq(b, activation);
+    vst1q_f32(dst0 + ch, a);
+    vst1q_f32(dst1 + ch, b);
+  }
+#endif
+  for (; ch < c; ++ch) {
+    float a = bias[ch];
+    float b = bias[ch];
+    a += row0[ch] * weights[0 * c + ch];
+    b += row0[c + ch] * weights[0 * c + ch];
+    a += row0[c + ch] * weights[1 * c + ch];
+    b += row0[2 * c + ch] * weights[1 * c + ch];
+    a += row0[2 * c + ch] * weights[2 * c + ch];
+    b += row0[3 * c + ch] * weights[2 * c + ch];
+    a += row1[ch] * weights[3 * c + ch];
+    b += row1[c + ch] * weights[3 * c + ch];
+    a += row1[c + ch] * weights[4 * c + ch];
+    b += row1[2 * c + ch] * weights[4 * c + ch];
+    a += row1[2 * c + ch] * weights[5 * c + ch];
+    b += row1[3 * c + ch] * weights[5 * c + ch];
+    a += row2[ch] * weights[6 * c + ch];
+    b += row2[c + ch] * weights[6 * c + ch];
+    a += row2[c + ch] * weights[7 * c + ch];
+    b += row2[2 * c + ch] * weights[7 * c + ch];
+    a += row2[2 * c + ch] * weights[8 * c + ch];
+    b += row2[3 * c + ch] * weights[8 * c + ch];
+    dst0[ch] = activate(a, activation);
+    dst1[ch] = activate(b, activation);
+  }
+}
+
 static void depthwise_3x3s1_same_rows(
     const float* input, const float* weights, const float* bias, float* output,
     int y0, int y1, int h, int w, int c, int activation) {
@@ -1203,7 +1312,16 @@ static void depthwise_3x3s1_same_rows(
   for (int y = y0; y < y1; ++y) {
     depthwise_3x3_checked_pixel(input, weights, bias, output, y, 0, h, w, c, activation);
     depthwise_3x3_checked_pixel(input, weights, bias, output, y, w - 1, h, w, c, activation);
-    for (int x = 1; x < w - 1; ++x) {
+    int x = 1;
+    for (; x + 1 < w - 1; x += 2) {
+      float* dst0 = output + ((size_t)y * w + x) * c;
+      float* dst1 = dst0 + c;
+      const float* row0 = input + ((size_t)(y - 1) * w + x - 1) * c;
+      const float* row1 = input + ((size_t)y * w + x - 1) * c;
+      const float* row2 = input + ((size_t)(y + 1) * w + x - 1) * c;
+      depthwise_3x3s1_same_pair(row0, row1, row2, weights, bias, dst0, dst1, c, activation);
+    }
+    for (; x < w - 1; ++x) {
       float* dst = output + ((size_t)y * w + x) * c;
       const float* row0 = input + ((size_t)(y - 1) * w + x - 1) * c;
       const float* row1 = input + ((size_t)y * w + x - 1) * c;

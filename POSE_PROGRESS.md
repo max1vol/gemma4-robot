@@ -488,3 +488,38 @@ End-to-end NEON reference path:
     - Compared with the pointwise-packing checkpoint, 4-core raw combined inference improved from `452.329 ms` to `428.227 ms`; 3-core improved from `464.347 ms` to `447.708 ms`.
     - Tracked 4-core frames improved from `154.296 ms` / `6.481 FPS` to `149.200 ms` / `6.702 FPS`; 3-core improved from `165.836 ms` / `6.030 FPS` to `158.468 ms` / `6.310 FPS`.
     - The fused path preserved raw tensor correctness and final landmark agreement. Next highest-value work is A53-specific pointwise kernel/K-padding or a fixed `3x3 stride2` depthwise path, not more generic scheduler work.
+
+- 2026-05-16 3x3 stride-1 SAME depthwise adjacent-pixel pass:
+  - Target:
+    - The retained change only touches the hot `3x3 stride-1 SAME` depthwise path. It computes adjacent interior x pixels together, reusing the same 3 depthwise weight vectors across both outputs and reusing the overlapping source vectors.
+    - This is deliberately narrower than a general depthwise rewrite, because raw tensor correctness is already solid and the current tracked path is sensitive to small kernel regressions.
+  - Runtime changes in `scripts/pose_neon_runtime.c`:
+    - Added AArch64 helpers `fmaq8_depthwise_pair_row` and `fmaq4_depthwise_pair_row`.
+    - Added `depthwise_3x3s1_same_pair`.
+    - Updated `depthwise_3x3s1_same_rows` to process interior columns two at a time, with the existing single-pixel path retained for left/right borders and odd tails.
+  - Failed idea:
+    - Also tried hoisting the interior/border branch out of each channel block in fused `PAD -> DEPTHWISE`.
+    - It was correct, but the Pi numbers were mixed: 4-core tracked improved slightly, while 3-core tracked and raw 3/4-core model timings regressed. Dropped this change and kept only the adjacent-pixel `3x3 stride-1 SAME` path.
+  - Local correctness command:
+    - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime -lm -pthread && rm -rf /tmp/pose-det-dw2-final-mac /tmp/pose-lm-dw2-final-mac && mkdir -p /tmp/pose-det-dw2-final-mac /tmp/pose-lm-dw2-final-mac && /tmp/pose_neon_runtime out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-dw2-final-mac 4 1 out/pose_runtime_test_detector/ref && /tmp/pose_neon_runtime out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-dw2-final-mac 4 1 out/pose_runtime_test_noseg/ref`
+    - Detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+    - Landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+  - Pi build/copy/final retained benchmark command:
+    - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o out/pose_neon_runtime_aarch64_ofast -lm -pthread'`
+    - `tar -cf - out/pose_neon_runtime_aarch64_ofast | tailscale ssh max@pi3 'cd ~/gemma4-robot && tar -xf - && chmod +x out/pose_neon_runtime_aarch64_ofast && for t in 2 3 4; do rm -rf /tmp/pose-det-dw2-final-t$t /tmp/pose-lm-dw2-final-t$t && mkdir -p /tmp/pose-det-dw2-final-t$t /tmp/pose-lm-dw2-final-t$t; ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-dw2-final-t$t $t 5 out/pose_runtime_test_detector/ref; ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-dw2-final-t$t $t 5 out/pose_runtime_test_noseg/ref; done && for t in 2 3 4; do ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-for-pose-dw2-final-track-t$t.json $t 10; done'`
+  - Pi environment note:
+    - Chromium kiosk and the local voice bot were running during the final retained benchmark.
+    - `vcgencmd get_throttled` reported `0x50005`; the governor was `ondemand` with max `1400000`, and `scaling_cur_freq` later returned `1400000`. Treat small differences as noisy.
+  - Pi final retained benchmark, raw model timings, `reps=5`:
+    - 2 cores: detector `444.669 ms`, landmarker `193.094 ms`, combined raw `637.763 ms` (`1.57 FPS`).
+    - 3 cores: detector `291.847 ms`, landmarker `154.795 ms`, combined raw `446.642 ms` (`2.24 FPS`).
+    - 4 cores: detector `288.676 ms`, landmarker `148.944 ms`, combined raw `437.620 ms` (`2.29 FPS`).
+  - Pi final retained benchmark, tracked camera-path timings, `reps=10`:
+    - 2 cores: acquisition `458.544 ms`; sample `9.054 ms`; landmarker `191.681 ms`; tracked frame `202.280 ms`; `4.944 FPS`.
+    - 3 cores: acquisition `325.825 ms`; sample `8.965 ms`; landmarker `146.995 ms`; tracked frame `157.608 ms`; `6.345 FPS`.
+    - 4 cores: acquisition `340.193 ms`; sample `9.331 ms`; landmarker `136.777 ms`; tracked frame `148.304 ms`; `6.743 FPS`.
+  - Interpretation:
+    - Against the previous fused-graph checkpoint, the tracked path improved modestly: 4-core tracked frame `149.200 ms -> 148.304 ms`, 3-core `158.468 ms -> 157.608 ms`, and 2-core `205.507 ms -> 202.280 ms`.
+    - Raw timings were noisy because of current Pi load/throttling, but the repeated tensor comparisons remained unchanged. The retained change is small, model-local, and directionally useful for the real tracked camera path.
+    - Fresh-context review agreed the paired-pixel tap order and bounds are correct, and warned that more small depthwise variants would become low-value unless tied to a clearly profiled stride-2 target.
+    - Next higher-leverage work is still pointwise A53-specific tuning or a dedicated fixed-shape depthwise implementation for the remaining named hot ops. Avoid more fused `PAD -> DEPTHWISE` branch rearrangement unless measured in isolation.

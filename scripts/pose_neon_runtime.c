@@ -1772,6 +1772,81 @@ static void op_resize_bilinear(PoseRuntime* rt, const PoseOpDef* op) {
   parallel_rows(rt, op, out->dims[1], op_resize_bilinear_rows);
 }
 
+static void op_resize_bilinear_add_rows(PoseRuntime* rt, const PoseOpDef* resize_op, int y0_out, int y1_out) {
+  const PoseOpDef* add_op = rt->task_aux_op;
+  const float* in = (const float*)rt->tensor[resize_op->inputs[0]];
+  int resize_out_idx = resize_op->outputs[0];
+  int residual_idx = add_op->inputs[0] == resize_out_idx ? add_op->inputs[1] : add_op->inputs[0];
+  const float* residual = (const float*)rt->tensor[residual_idx];
+  float* out = (float*)rt->tensor[add_op->outputs[0]];
+  const PoseTensorDef* in_def = &rt->def->tensors[resize_op->inputs[0]];
+  const PoseTensorDef* out_def = &rt->def->tensors[add_op->outputs[0]];
+  int in_h = in_def->dims[1], in_w = in_def->dims[2], c = in_def->dims[3];
+  int out_h = out_def->dims[1], out_w = out_def->dims[2];
+  for (int oy = y0_out; oy < y1_out; ++oy) {
+    float fy;
+    if (resize_op->align_corners && out_h > 1) {
+      fy = (float)oy * (float)(in_h - 1) / (float)(out_h - 1);
+    } else if (resize_op->half_pixel_centers) {
+      fy = ((float)oy + 0.5f) * (float)in_h / (float)out_h - 0.5f;
+    } else {
+      fy = (float)oy * (float)in_h / (float)out_h;
+    }
+    if (fy < 0.0f) fy = 0.0f;
+    int y0 = (int)floorf(fy);
+    if (y0 >= in_h - 1) y0 = in_h - 1;
+    int y1 = y0 + 1 < in_h ? y0 + 1 : y0;
+    float wy = fy - (float)y0;
+    for (int ox = 0; ox < out_w; ++ox) {
+      float fx;
+      if (resize_op->align_corners && out_w > 1) {
+        fx = (float)ox * (float)(in_w - 1) / (float)(out_w - 1);
+      } else if (resize_op->half_pixel_centers) {
+        fx = ((float)ox + 0.5f) * (float)in_w / (float)out_w - 0.5f;
+      } else {
+        fx = (float)ox * (float)in_w / (float)out_w;
+      }
+      if (fx < 0.0f) fx = 0.0f;
+      int x0 = (int)floorf(fx);
+      if (x0 >= in_w - 1) x0 = in_w - 1;
+      int x1 = x0 + 1 < in_w ? x0 + 1 : x0;
+      float wx = fx - (float)x0;
+      const float* p00 = in + ((size_t)y0 * in_w + x0) * c;
+      const float* p01 = in + ((size_t)y0 * in_w + x1) * c;
+      const float* p10 = in + ((size_t)y1 * in_w + x0) * c;
+      const float* p11 = in + ((size_t)y1 * in_w + x1) * c;
+      size_t out_offset = ((size_t)oy * out_w + ox) * c;
+      const float* res = residual + out_offset;
+      float* dst = out + out_offset;
+      int ch = 0;
+#if defined(__aarch64__)
+      for (; ch + 4 <= c; ch += 4) {
+        float32x4_t p00v = vld1q_f32(p00 + ch);
+        float32x4_t p01v = vld1q_f32(p01 + ch);
+        float32x4_t p10v = vld1q_f32(p10 + ch);
+        float32x4_t p11v = vld1q_f32(p11 + ch);
+        float32x4_t top = vfmaq_n_f32(p00v, vsubq_f32(p01v, p00v), wx);
+        float32x4_t bot = vfmaq_n_f32(p10v, vsubq_f32(p11v, p10v), wx);
+        float32x4_t v = vfmaq_n_f32(top, vsubq_f32(bot, top), wy);
+        v = vaddq_f32(v, vld1q_f32(res + ch));
+        v = activateq(v, add_op->activation);
+        vst1q_f32(dst + ch, v);
+      }
+#endif
+      for (; ch < c; ++ch) {
+        float top = p00[ch] + (p01[ch] - p00[ch]) * wx;
+        float bot = p10[ch] + (p11[ch] - p10[ch]) * wx;
+        dst[ch] = activate(top + (bot - top) * wy + res[ch], add_op->activation);
+      }
+    }
+  }
+}
+
+static void op_resize_bilinear_add(PoseRuntime* rt, const PoseOpDef* resize_op, const PoseOpDef* add_op) {
+  const PoseTensorDef* out = &rt->def->tensors[add_op->outputs[0]];
+  parallel_rows_aux(rt, resize_op, add_op, out->dims[1], op_resize_bilinear_add_rows);
+}
+
 static void op_max_pool_rows(PoseRuntime* rt, const PoseOpDef* op, int y0, int y1) {
   const float* in = (const float*)rt->tensor[op->inputs[0]];
   float* out = (float*)rt->tensor[op->outputs[0]];
@@ -2074,6 +2149,26 @@ static int can_fuse_pad_rgb_stride2_conv(const PoseRuntime* rt, int op_index) {
   return 1;
 }
 
+static int can_fuse_resize_add(const PoseRuntime* rt, int op_index) {
+  if (op_index + 1 >= rt->def->op_count) return 0;
+  const PoseOpDef* resize_op = &rt->def->ops[op_index];
+  const PoseOpDef* add_op = &rt->def->ops[op_index + 1];
+  if (resize_op->op != POSE_OP_RESIZE_BILINEAR || add_op->op != POSE_OP_ADD) return 0;
+  if (add_op->input_count != 2 || add_op->output_count != 1) return 0;
+  int resize_out = resize_op->outputs[0];
+  int residual_idx = -1;
+  if (add_op->inputs[0] == resize_out) residual_idx = add_op->inputs[1];
+  if (add_op->inputs[1] == resize_out) residual_idx = add_op->inputs[0];
+  if (residual_idx < 0) return 0;
+  if (tensor_consumer_count_after(rt->def, op_index + 1, resize_out) != 1) return 0;
+  const PoseTensorDef* resize_out_def = &rt->def->tensors[resize_out];
+  const PoseTensorDef* residual = &rt->def->tensors[residual_idx];
+  const PoseTensorDef* add_out = &rt->def->tensors[add_op->outputs[0]];
+  if (resize_out_def->rank != 4 || residual->rank != 4 || add_out->rank != 4) return 0;
+  if (!same_tensor_shape(resize_out_def, residual) || !same_tensor_shape(resize_out_def, add_out)) return 0;
+  return 1;
+}
+
 static int run_model_step(PoseRuntime* rt, int i, int end_exclusive, double* times_ms) {
   int profile = times_ms != NULL;
   if (i + 1 < end_exclusive && can_fuse_pad_rgb_stride2_conv(rt, i)) {
@@ -2092,6 +2187,12 @@ static int run_model_step(PoseRuntime* rt, int i, int end_exclusive, double* tim
     double t0 = profile ? now_s() : 0.0;
     op_depthwise_from_pad(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
     if (profile) times_ms[i + 1] += (now_s() - t0) * 1000.0;
+    return i + 2;
+  }
+  if (i + 1 < end_exclusive && can_fuse_resize_add(rt, i)) {
+    double t0 = profile ? now_s() : 0.0;
+    op_resize_bilinear_add(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
+    if (profile) times_ms[i] += (now_s() - t0) * 1000.0;
     return i + 2;
   }
   double t0 = profile ? now_s() : 0.0;
@@ -2125,6 +2226,7 @@ typedef enum {
   BENCH_PAD_RGB_CONV = 1,
   BENCH_POINTWISE_CONV_ADD = 2,
   BENCH_PAD_DEPTHWISE = 3,
+  BENCH_RESIZE_ADD = 4,
 } BenchKind;
 
 typedef struct {
@@ -2156,6 +2258,7 @@ static const char* bench_kind_name(BenchKind kind) {
     case BENCH_PAD_RGB_CONV: return "PAD+CONV2D";
     case BENCH_POINTWISE_CONV_ADD: return "CONV2D+ADD";
     case BENCH_PAD_DEPTHWISE: return "PAD+DEPTHWISE";
+    case BENCH_RESIZE_ADD: return "RESIZE_BILINEAR+ADD";
     case BENCH_SINGLE:
     default: return "SINGLE";
   }
@@ -2214,6 +2317,20 @@ static BenchTarget resolve_bench_target(PoseRuntime* rt, int source_op_index, in
       target.aux_pos = pos + 1;
       return target;
     }
+    if (pos > 0 && can_fuse_resize_add(rt, pos - 1)) {
+      target.kind = BENCH_RESIZE_ADD;
+      target.start_pos = pos - 1;
+      target.timed_pos = pos - 1;
+      target.aux_pos = pos;
+      return target;
+    }
+    if (can_fuse_resize_add(rt, pos)) {
+      target.kind = BENCH_RESIZE_ADD;
+      target.start_pos = pos;
+      target.timed_pos = pos;
+      target.aux_pos = pos + 1;
+      return target;
+    }
   }
   return target;
 }
@@ -2221,7 +2338,8 @@ static BenchTarget resolve_bench_target(PoseRuntime* rt, int source_op_index, in
 static const PoseOpDef* bench_output_op(const PoseRuntime* rt, const BenchTarget* target) {
   if (target->kind == BENCH_PAD_RGB_CONV ||
       target->kind == BENCH_POINTWISE_CONV_ADD ||
-      target->kind == BENCH_PAD_DEPTHWISE) {
+      target->kind == BENCH_PAD_DEPTHWISE ||
+      target->kind == BENCH_RESIZE_ADD) {
     return &rt->def->ops[target->aux_pos];
   }
   return &rt->def->ops[target->timed_pos];
@@ -2252,6 +2370,8 @@ static uint64_t bench_target_mac_count(const PoseRuntime* rt, const BenchTarget*
       return op_mac_count(rt, &rt->def->ops[target->aux_pos]);
     case BENCH_POINTWISE_CONV_ADD:
       return op_mac_count(rt, &rt->def->ops[target->timed_pos]);
+    case BENCH_RESIZE_ADD:
+      return 0;
     case BENCH_SINGLE:
     default:
       return op_mac_count(rt, &rt->def->ops[target->timed_pos]);
@@ -2270,6 +2390,10 @@ static void run_bench_target_once(PoseRuntime* rt, const BenchTarget* target) {
       break;
     case BENCH_PAD_DEPTHWISE:
       op_depthwise_from_pad(
+          rt, &rt->def->ops[target->start_pos], &rt->def->ops[target->aux_pos]);
+      break;
+    case BENCH_RESIZE_ADD:
+      op_resize_bilinear_add(
           rt, &rt->def->ops[target->start_pos], &rt->def->ops[target->aux_pos]);
       break;
     case BENCH_SINGLE:
@@ -2322,6 +2446,12 @@ static BenchSnapshots bench_snapshot_inputs(PoseRuntime* rt, const BenchTarget* 
       bench_snapshot_op_inputs(
           rt, &snaps, &rt->def->ops[target->aux_pos],
           rt->def->ops[target->timed_pos].outputs[0]);
+      break;
+    case BENCH_RESIZE_ADD:
+      bench_snapshot_op_inputs(rt, &snaps, &rt->def->ops[target->start_pos], -1);
+      bench_snapshot_op_inputs(
+          rt, &snaps, &rt->def->ops[target->aux_pos],
+          rt->def->ops[target->start_pos].outputs[0]);
       break;
     case BENCH_SINGLE:
     default:

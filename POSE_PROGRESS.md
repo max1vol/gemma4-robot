@@ -672,3 +672,36 @@ End-to-end NEON reference path:
     - The ROI sampler helper also moved tracked sample time the wrong way in repeated `pipeline-rgb-track` runs, so all sampler changes were reverted.
     - Tried adding `restrict` qualifiers to the packed pointwise tile input/residual/output pointers. Correctness stayed unchanged, but tracked 4-core performance regressed in the measured run from `149.389 ms` / `6.694 FPS` to `152.696 ms` / `6.549 FPS`. Reverted.
     - Lesson: do not keep micro-edits that only improve isolated noisy op samples. For this runtime, retain changes only when they improve the tracked landmarker frame or a consistently hot fused op with repeated A/B evidence.
+
+- 2026-05-16 retained landmarker `RESIZE_BILINEAR -> ADD` fusion:
+  - Targeted the three landmarker decoder skip merges at source ops `186->187`, `188->189`, and `190->191`.
+  - Runtime changes in `scripts/pose_neon_runtime.c`:
+    - Added `can_fuse_resize_add` and `op_resize_bilinear_add`, guarded by single-consumer and shape checks.
+    - The fused path writes the ADD output directly, skips the intermediate resized tensor, and vectorizes the resize-plus-residual-add channel loop on AArch64.
+    - Added `bench-op` support for `RESIZE_BILINEAR+ADD`, so either the resize source op or the following add source op can time the fused pair.
+  - Local correctness command:
+    - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime -lm -pthread && rm -rf /tmp/pose-det-resizeadd /tmp/pose-lm-resizeadd && mkdir -p /tmp/pose-det-resizeadd /tmp/pose-lm-resizeadd && /tmp/pose_neon_runtime out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-resizeadd 4 1 out/pose_runtime_test_detector/ref && /tmp/pose_neon_runtime out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-resizeadd 4 1 out/pose_runtime_test_noseg/ref`
+    - Detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+    - Landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+  - Pi cross-build/copy command:
+    - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o out/pose_neon_runtime_aarch64_resizeadd -lm -pthread'`
+    - `tar -cf - out/pose_neon_runtime_aarch64_resizeadd | tailscale ssh max@pi3 'cd ~/gemma4-robot && tar -xf - && chmod +x out/pose_neon_runtime_aarch64_resizeadd ...'`
+  - Pi fused-op benchmark, 4 threads, `reps=30`, `warmup=3`:
+    - Old op `186` + `187`: `0.111296 + 0.048967 = 0.160263 ms`; fused `186->187`: `0.118091 ms`.
+    - Old op `188` + `189`: `0.226710 + 0.219992 = 0.446702 ms`; fused `188->189`: `0.277648 ms`.
+    - Old op `190` + `191`: `0.720188 + 1.106153 = 1.826341 ms`; fused `190->191`: `1.466114 ms`.
+  - Pi tracked-frame A/B:
+    - Three 4-core alternating runs, `reps=12`, averaged old `152.257 ms` and new `150.636 ms`; landmarker averaged old `141.011 ms` and new `139.338 ms`.
+    - 2-core one-shot, `reps=10`: old `206.006 ms` / `4.854 FPS`; new `200.170 ms` / `4.996 FPS`.
+    - 3-core one-shot, `reps=10`: old `161.258 ms` / `6.201 FPS`; new `156.260 ms` / `6.400 FPS`.
+    - 4-core one-shot, `reps=10`: old `148.867 ms` / `6.717 FPS`; new `150.105 ms` / `6.662 FPS`.
+    - Longer 4-core run, `reps=30`: old `146.070 ms` / `6.846 FPS`; new `145.557 ms` / `6.870 FPS`.
+  - Final default binary refresh:
+    - Rebuilt `out/pose_neon_runtime_aarch64_ofast` with the retained fusion and copied it to the Pi.
+    - Final Pi raw tensor check with the default binary stayed unchanged: detector tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.36e-5`.
+    - Final 4-core tracked sanity, `reps=20`: acquisition `309.567 ms`; sample `9.330 ms`; landmarker `135.364 ms`; tracked frame `146.331 ms`; `6.834 FPS`; amortized over 20 frames `161.809 ms` / `6.180 FPS`.
+  - Interpretation:
+    - This is a retained graph-level fusion rather than a low-level pointwise replacement. It removes most standalone ADD time in the landmarker decoder and gives a small but measurable tracked-frame improvement under repeated A/B, especially on 2 and 3 cores.
+    - The 4-core tracked path remains noisy under current Pi load, so future claimed gains should continue using alternating old/new runs plus at least one longer run.
+    - Fresh-context review found no blocking correctness issue with the fusion guards, noted that AArch64 FMA can be non-bit-identical to separate resize then add, and recommended the Pi raw-output, fused-op, and repeated tracked A/B validations recorded above.
+    - Next high-leverage runtime work is still the fused residual pointwise microkernel or a targeted depthwise kernel for the current profile's named hot ops.

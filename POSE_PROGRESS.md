@@ -1551,3 +1551,48 @@ End-to-end NEON reference path:
   - Decision:
     - Retained. The isolated fused chain is a clear 2/3/4-worker win, the tracked path improves in all completed 2- and 3-worker A/B runs, and 4-worker improves in the initial run plus two follow-up checks including reversed-order `reps=72`.
     - The single batch-A 4-worker regression is recorded as residual Pi noise around an under-voltage/reboot window. Future changes should keep using repeated tracked A/B and should not stack on this pattern unless they beat the tracked path, not only the fused op.
+
+- 2026-05-16 retained landmarker `006->009` fused `DEPTHWISE->CONV2D` tile path:
+  - Motivation:
+    - Fresh profile after `bc685c2` showed the tracked path at `115.442 ms` / `8.662 FPS` for a 24-frame 4-worker smoke, with landmarker totals still dominated by CONV2D `71.178 ms` and DEPTHWISE `69.808 ms`.
+    - Top landmarker ops included retained fused `032` `6.878 ms`, retained fused `049` `6.567 ms`, then `006 DEPTHWISE` `6.240 ms`, first conv `003` `5.935 ms`, `058 DEPTHWISE` `5.403 ms`, and `012 CONV2D` `5.272 ms`.
+    - A fresh-context reviewer independently ranked `006 DEPTHWISE -> 009 CONV2D` first: `[1,128,128,24]` 3x3 stride-1 SAME depthwise with ReLU6 followed by 1x1 pointwise to `[1,128,128,8]`. This is not one of the previously rejected no-op or worker-count gates.
+  - Implementation:
+    - Added a narrowly guarded `can_fuse_depthwise_pointwise` for `pose_landmarker` source ops `006/009` only, with `POSE_FUSE_DW_PW=0` as a same-binary disable switch.
+    - Added a no-residual `op_depthwise_pointwise` tile worker. It computes a `POSE_PW_TILE x 24` depthwise scratch tile using the existing six-pixel `depthwise_3x3s1_same_tile_to_tmp`, then immediately calls the packed 1x1 tile path and skips materializing tensor `189`.
+    - Added `bench-op` support for `DEPTHWISE+CONV2D`, so requests for op `006` or `009` can time the fused pair.
+  - Build and local correctness:
+    - Passed `git diff --check`.
+    - Local build passed:
+      - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_dw_pw6_local -lm -pthread`
+    - Local landmarker outputs with the fusion enabled and disabled matched byte-for-byte for tensors `283`, `310`, `312`, and `315`.
+    - Cross-builds passed:
+      - `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_dwpw6`
+      - `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_ofast`
+  - Pi raw correctness and isolated fused-op timing:
+    - Candidate binary sha256 before final install: `aab29dfd47af94898b06aaed8e65c55b6a06a5750bf9994035a485ed3d8a6113`.
+    - Raw checks stayed in the usual range:
+      - Detector 4-thread single rep: `305.187 ms`; tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`.
+      - Landmarker 4-thread single rep: `112.453 ms`; tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+    - Targeted `bench-op`, old separated path forced with `POSE_FUSE_DW_PW=0`, `reps=50`, `warmup=6`:
+      - 2 workers: old `006` `5.846 ms` + old `009` `2.106 ms` = `7.951 ms`; fused `006->009` `7.144 ms`.
+      - 3 workers: old `4.234 ms` + `1.831 ms` = `6.065 ms`; fused `5.196 ms`.
+      - 4 workers: old `3.939 ms` + `1.924 ms` = `5.864 ms`; fused `3.982 ms`.
+  - Integrated tracked A/B on `out/human-for-pose.rgb`, `514x994`, `reps=48`, `refresh_interval=0`, current retained `ofast` vs candidate:
+    - Batch A, old first:
+      - 2 workers: `144.769 -> 142.295 ms`, `6.908 -> 7.028 FPS`.
+      - 3 workers: `119.572 -> 116.548 ms`, `8.363 -> 8.580 FPS`.
+      - 4 workers: `116.026 -> 113.457 ms`, `8.619 -> 8.814 FPS`.
+    - Batch B, candidate first:
+      - 2 workers: candidate `143.590 ms`, old second `145.684 ms`.
+      - 3 workers: candidate `117.149 ms`, old second `119.661 ms`.
+      - 4 workers: candidate `114.594 ms`, old second `116.515 ms`.
+    - Exported tracked JSON matched exactly in every batch and worker mode: `0.0` max abs over `355` numeric fields.
+  - Final default binary refresh:
+    - Rebuilt and copied `out/pose_neon_runtime_aarch64_ofast` to the Pi. A first combined copy-plus-48-frame-smoke run rebooted the Pi during the final tracked smoke; `dmesg` again reported `Undervoltage detected!`, and after reboot the binary had rolled back to the previous sha. Re-copied the binary in a separate step and ran `sync` before benchmarking again.
+    - Pi sha256 for refreshed `ofast`: `846246ef9d57ab7ac745f788b1161912332026cd1b75f3830662ac4e398eead6`.
+    - Final raw landmarker check after the synced copy: `145.706 ms`; tensor diffs stayed in the usual range.
+    - Final 4-worker tracked smoke after the synced copy, `reps=24`, `refresh_interval=0`: tracked frame `117.008 ms`, `8.546 FPS`; amortized `132.688 ms`, `7.536 FPS`.
+  - Decision:
+    - Retained. The fused pair improves the isolated chain at 2/3/4 workers, improves repeated tracked A/B in both old-first and candidate-first order, and keeps exported tracked JSON exact.
+    - The Pi power supply/undervoltage issue is now affecting long final smoke stability. Future final-copy steps should copy/sync separately before running longer benchmarks, and repeated A/B evidence should be preferred over one post-copy smoke if the board is unstable.

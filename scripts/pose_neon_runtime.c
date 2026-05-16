@@ -2956,6 +2956,49 @@ static void op_depthwise_pointwise_add(PoseRuntime* rt, const PoseOpDef* dw_op, 
   parallel_rows_aux(rt, dw_op, conv_op, pixel_tiles, op_depthwise_pointwise_add_tiles);
 }
 
+static void op_depthwise_pointwise_tiles(PoseRuntime* rt, const PoseOpDef* dw_op, int item0, int item1) {
+  const PoseOpDef* conv_op = rt->task_aux_op;
+  const float* input = (const float*)rt->tensor[dw_op->inputs[0]];
+  const float* dw_weights = (const float*)rt->tensor[dw_op->inputs[1]];
+  const float* dw_bias = (const float*)rt->tensor[dw_op->inputs[2]];
+  const PackedPointwiseX8* packed = (const PackedPointwiseX8*)rt->packed[conv_op->inputs[1]];
+  float* output = (float*)rt->tensor[conv_op->outputs[0]];
+  const PoseTensorDef* in = &rt->def->tensors[dw_op->inputs[0]];
+  const PoseTensorDef* dw_out = &rt->def->tensors[dw_op->outputs[0]];
+  const PoseTensorDef* conv_out = &rt->def->tensors[conv_op->outputs[0]];
+  int h = in->dims[1];
+  int w = in->dims[2];
+  int c = in->dims[3];
+  int out_c = conv_out->dims[3];
+  int oc_blocks = (out_c + 7) / 8;
+  size_t pixels = (size_t)dw_out->dims[1] * dw_out->dims[2];
+  if (c > POSE_DW_PW_MAX_C) {
+    fprintf(stderr, "fused DEPTHWISE->CONV2D c=%d exceeds scratch limit %d\n", c, POSE_DW_PW_MAX_C);
+    exit(2);
+  }
+  for (int item = item0; item < item1; ++item) {
+    size_t p0 = (size_t)item * POSE_PW_TILE;
+    int p_count = (int)(pixels - p0 < POSE_PW_TILE ? pixels - p0 : POSE_PW_TILE);
+    float dw_tile[POSE_PW_TILE * POSE_DW_PW_MAX_C] __attribute__((aligned(64)));
+    depthwise_3x3s1_same_tile_to_tmp(
+        input, dw_weights, dw_bias, dw_tile, p0, p_count, h, w, c, dw_op->activation);
+    float* output_tile = output + p0 * out_c;
+    for (int oc_block = 0; oc_block < oc_blocks; ++oc_block) {
+      int oc0 = oc_block * 8;
+      int oc_count = out_c - oc0 < 8 ? out_c - oc0 : 8;
+      conv2d_1x1_packed_tile(
+          dw_tile, packed, output_tile, 0, p_count, oc_block, oc_count, conv_op->activation);
+    }
+  }
+}
+
+static void op_depthwise_pointwise(PoseRuntime* rt, const PoseOpDef* dw_op, const PoseOpDef* conv_op) {
+  const PoseTensorDef* out = &rt->def->tensors[dw_op->outputs[0]];
+  size_t pixels = (size_t)out->dims[1] * out->dims[2];
+  int pixel_tiles = (int)((pixels + POSE_PW_TILE - 1) / POSE_PW_TILE);
+  parallel_rows_aux(rt, dw_op, conv_op, pixel_tiles, op_depthwise_pointwise_tiles);
+}
+
 static void op_add(PoseRuntime* rt, const PoseOpDef* op) {
   const float* a = (const float*)rt->tensor[op->inputs[0]];
   const float* b = (const float*)rt->tensor[op->inputs[1]];
@@ -3436,6 +3479,44 @@ static int can_fuse_depthwise_pointwise_add(const PoseRuntime* rt, int op_index)
   return 1;
 }
 
+static int can_fuse_depthwise_pointwise(const PoseRuntime* rt, int op_index) {
+  const char* disable = getenv("POSE_FUSE_DW_PW");
+  if (disable && strcmp(disable, "0") == 0) return 0;
+  if (op_index + 1 >= rt->def->op_count) return 0;
+  const PoseOpDef* dw_op = &rt->def->ops[op_index];
+  const PoseOpDef* conv_op = &rt->def->ops[op_index + 1];
+  if (strcmp(rt->def->name, "pose_landmarker") != 0 || dw_op->index != 6 || conv_op->index != 9) return 0;
+  if (dw_op->op != POSE_OP_DEPTHWISE || conv_op->op != POSE_OP_CONV2D) return 0;
+  if (conv_op->inputs[0] != dw_op->outputs[0]) return 0;
+  if (tensor_consumer_count_after(rt->def, op_index + 1, dw_op->outputs[0]) != 1) return 0;
+  if (dw_op->depth_multiplier != 1 || dw_op->stride_h != 1 || dw_op->stride_w != 1 ||
+      dw_op->dilation_h != 1 || dw_op->dilation_w != 1 || dw_op->padding != 0) {
+    return 0;
+  }
+  if (conv_op->activation != 0 || conv_op->stride_h != 1 || conv_op->stride_w != 1) return 0;
+  if (rt->packed_type[conv_op->inputs[1]] != POSE_PACK_POINTWISE_X8) return 0;
+  const PoseTensorDef* in = &rt->def->tensors[dw_op->inputs[0]];
+  const PoseTensorDef* dw_wt = &rt->def->tensors[dw_op->inputs[1]];
+  const PoseTensorDef* dw_out = &rt->def->tensors[dw_op->outputs[0]];
+  const PoseTensorDef* conv_wt = &rt->def->tensors[conv_op->inputs[1]];
+  const PoseTensorDef* conv_out = &rt->def->tensors[conv_op->outputs[0]];
+  if (in->rank != 4 || dw_wt->rank != 4 || dw_out->rank != 4 ||
+      conv_wt->rank != 4 || conv_out->rank != 4) {
+    return 0;
+  }
+  if (in->dims[1] != dw_out->dims[1] || in->dims[2] != dw_out->dims[2] ||
+      in->dims[3] != dw_out->dims[3]) {
+    return 0;
+  }
+  if (dw_wt->dims[0] != 1 || dw_wt->dims[1] != 3 || dw_wt->dims[2] != 3 ||
+      dw_wt->dims[3] != in->dims[3]) {
+    return 0;
+  }
+  if (conv_wt->dims[1] != 1 || conv_wt->dims[2] != 1 || conv_wt->dims[3] != dw_out->dims[3]) return 0;
+  if (conv_out->dims[1] != dw_out->dims[1] || conv_out->dims[2] != dw_out->dims[2]) return 0;
+  return 1;
+}
+
 static int can_fuse_pad_depthwise_pointwise(const PoseRuntime* rt, int op_index) {
   const char* disable = getenv("POSE_FUSE_PAD_DW_PW");
   if (disable && strcmp(disable, "0") == 0) return 0;
@@ -3574,6 +3655,12 @@ static int run_model_step(PoseRuntime* rt, int i, int end_exclusive, double* tim
     if (profile) times_ms[i] += (now_s() - t0) * 1000.0;
     return i + 3;
   }
+  if (i + 1 < end_exclusive && can_fuse_depthwise_pointwise(rt, i)) {
+    double t0 = profile ? now_s() : 0.0;
+    op_depthwise_pointwise(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
+    if (profile) times_ms[i] += (now_s() - t0) * 1000.0;
+    return i + 2;
+  }
   if (i + 2 < end_exclusive && can_fuse_pad_depthwise_pointwise(rt, i)) {
     double t0 = profile ? now_s() : 0.0;
     op_pad_depthwise_pointwise(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
@@ -3632,6 +3719,7 @@ typedef enum {
   BENCH_RESIZE_ADD = 4,
   BENCH_DEPTHWISE_POINTWISE_ADD = 5,
   BENCH_PAD_DEPTHWISE_POINTWISE = 6,
+  BENCH_DEPTHWISE_POINTWISE = 7,
 } BenchKind;
 
 typedef struct {
@@ -3667,6 +3755,7 @@ static const char* bench_kind_name(BenchKind kind) {
     case BENCH_RESIZE_ADD: return "RESIZE_BILINEAR+ADD";
     case BENCH_DEPTHWISE_POINTWISE_ADD: return "DEPTHWISE+CONV2D+ADD";
     case BENCH_PAD_DEPTHWISE_POINTWISE: return "PAD+DEPTHWISE+CONV2D";
+    case BENCH_DEPTHWISE_POINTWISE: return "DEPTHWISE+CONV2D";
     case BENCH_SINGLE:
     default: return "SINGLE";
   }
@@ -3705,6 +3794,20 @@ static BenchTarget resolve_bench_target(PoseRuntime* rt, int source_op_index, in
       target.timed_pos = pos;
       target.aux_pos = pos + 1;
       target.aux2_pos = pos + 2;
+      return target;
+    }
+    if (pos > 0 && can_fuse_depthwise_pointwise(rt, pos - 1)) {
+      target.kind = BENCH_DEPTHWISE_POINTWISE;
+      target.start_pos = pos - 1;
+      target.timed_pos = pos - 1;
+      target.aux_pos = pos;
+      return target;
+    }
+    if (can_fuse_depthwise_pointwise(rt, pos)) {
+      target.kind = BENCH_DEPTHWISE_POINTWISE;
+      target.start_pos = pos;
+      target.timed_pos = pos;
+      target.aux_pos = pos + 1;
       return target;
     }
     if (pos > 1 && can_fuse_pad_depthwise_pointwise(rt, pos - 2)) {
@@ -3795,6 +3898,9 @@ static const PoseOpDef* bench_output_op(const PoseRuntime* rt, const BenchTarget
   if (target->kind == BENCH_DEPTHWISE_POINTWISE_ADD) {
     return &rt->def->ops[target->aux2_pos];
   }
+  if (target->kind == BENCH_DEPTHWISE_POINTWISE) {
+    return &rt->def->ops[target->aux_pos];
+  }
   if (target->kind == BENCH_PAD_DEPTHWISE_POINTWISE) {
     return &rt->def->ops[target->aux2_pos];
   }
@@ -3835,6 +3941,9 @@ static uint64_t bench_target_mac_count(const PoseRuntime* rt, const BenchTarget*
     case BENCH_DEPTHWISE_POINTWISE_ADD:
       return op_mac_count(rt, &rt->def->ops[target->timed_pos]) +
           op_mac_count(rt, &rt->def->ops[target->aux_pos]);
+    case BENCH_DEPTHWISE_POINTWISE:
+      return op_mac_count(rt, &rt->def->ops[target->timed_pos]) +
+          op_mac_count(rt, &rt->def->ops[target->aux_pos]);
     case BENCH_PAD_DEPTHWISE_POINTWISE:
       return op_mac_count(rt, &rt->def->ops[target->aux_pos]) +
           op_mac_count(rt, &rt->def->ops[target->aux2_pos]);
@@ -3858,6 +3967,10 @@ static void run_bench_target_once(PoseRuntime* rt, const BenchTarget* target) {
       break;
     case BENCH_DEPTHWISE_POINTWISE_ADD:
       op_depthwise_pointwise_add(
+          rt, &rt->def->ops[target->timed_pos], &rt->def->ops[target->aux_pos]);
+      break;
+    case BENCH_DEPTHWISE_POINTWISE:
+      op_depthwise_pointwise(
           rt, &rt->def->ops[target->timed_pos], &rt->def->ops[target->aux_pos]);
       break;
     case BENCH_PAD_DEPTHWISE_POINTWISE:
@@ -3931,6 +4044,12 @@ static BenchSnapshots bench_snapshot_inputs(PoseRuntime* rt, const BenchTarget* 
       bench_snapshot_op_inputs(
           rt, &snaps, &rt->def->ops[target->aux2_pos],
           rt->def->ops[target->aux_pos].outputs[0]);
+      break;
+    case BENCH_DEPTHWISE_POINTWISE:
+      bench_snapshot_op_inputs(rt, &snaps, &rt->def->ops[target->timed_pos], -1);
+      bench_snapshot_op_inputs(
+          rt, &snaps, &rt->def->ops[target->aux_pos],
+          rt->def->ops[target->timed_pos].outputs[0]);
       break;
     case BENCH_PAD_DEPTHWISE_POINTWISE:
       bench_snapshot_op_inputs(rt, &snaps, &rt->def->ops[target->start_pos], -1);

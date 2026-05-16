@@ -3,7 +3,7 @@
  *
  * Build after generating out/pose_runtime_data with extract_pose_runtime_data.py:
  *   cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data \
- *      scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime -lm
+ *      pose_estimation/pose_runtime.c -o /tmp/pose_runtime -lm -pthread
  *
  * This file intentionally does not link MediaPipe, TensorFlow Lite, or LiteRT.
  */

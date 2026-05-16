@@ -29,7 +29,7 @@
     .size \name, .-\name
   .endm
 #else
-  #error "pose_a53_pw6x8.S is currently expected to be built as ELF AArch64"
+  #error "pose_estimation/a53_pw6x8.S is currently expected to be built as ELF AArch64"
 #endif
 
 # void pose_f32_gemm_minmax_ukernel_6x8__asm_a53(

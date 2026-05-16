@@ -1642,3 +1642,43 @@ End-to-end NEON reference path:
   - Decision:
     - Retained. The fused `020->023->026` chain is a clear isolated win at 2/3/4 workers, improves same-run tracked A/B in all worker modes, and preserves exact tracked JSON.
     - The next candidate should be chosen from a fresh profile after this change. Avoid 5x5 scratch-only residual fusion unless it is materially different from the rejected `058` attempts or the profile shows a large enough tracked-path opportunity to justify a new design.
+
+- 2026-05-16 NEON-only cleanup and official photo validation:
+  - Direction:
+    - Dropped the GPU path from the immediate implementation plan. The runtime is now treated as a NEON-only custom pose executor.
+    - Moved the low-level runtime sources out of `scripts/` into `pose_estimation/`:
+      - `pose_estimation/pose_runtime.c`
+      - `pose_estimation/a53_pw6x8.S`
+      - `pose_estimation/README.md`
+    - Kept `scripts/build_pose_runtime_aarch64.sh` as a build helper only; it now compiles from `pose_estimation/`.
+  - Builds:
+    - Local compile passed:
+      - `git diff --check && cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data pose_estimation/pose_runtime.c -o /tmp/pose_runtime_clean_local -lm -pthread`
+    - AArch64 cross-build passed:
+      - `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_ofast`
+      - local sha256: `f092ee49183c22604debe3460e05e5ca3a59af2e12c55f7ac24e4ccfdd9a37af`
+  - Fresh official MediaPipe reference:
+    - Regenerated an official output with isolated dependencies:
+      - `uv run --isolated --with mediapipe --with pillow --with numpy python scripts/pose_official_image_ref.py /tmp/pose_landmarker_lite.task out/human-for-pose.png out/human-for-pose-official-mediapipe-fresh.json`
+    - Official result: `poses=1`, image shape `[994, 514, 3]`.
+  - Custom runtime on the supplied photo:
+    - Ran the C runtime on `out/human-for-pose.rgb`:
+      - `/tmp/pose_runtime_clean_local pipeline-rgb out/pose_runtime_data out/human-for-pose.rgb 514 994 out/human-for-pose-neon-clean-c.json 4 1`
+      - local Mac timing only: `detector_avg_ms=8.096`, `landmarker_avg_ms=4.063`, `frame_avg_ms=12.762`, `fps=78.358`.
+    - Compared `out/human-for-pose-neon-clean-c.json` with `out/human-for-pose-official-mediapipe-fresh.json`:
+      - Image landmarks: max abs `x=0.042309`, `y=0.010982`, `z=0.271221`; mean abs `x=0.006461`, `y=0.002579`, `z=0.100677`.
+      - World landmarks: max abs `x=0.024660`, `y=0.019199`, `z=0.073989`; mean abs `x=0.010729`, `y=0.007015`, `z=0.024695`.
+      - Largest image-space outlier: right foot index, `22.30 px`; next largest: left heel, `13.31 px`.
+    - Rendered and visually inspected overlay:
+      - `out/human-for-pose-official-vs-neon-overlay.png`
+      - Green official MediaPipe landmarks and magenta custom runtime landmarks overlap closely on the body. The visible disagreement is concentrated around feet/toes and a few small extremity points; the pose is good enough visually for squat-counter geometry.
+  - Pi smoke check:
+    - Copied the moved-source AArch64 binary to the Pi and ran:
+      - `./out/pose_neon_runtime_aarch64_ofast pipeline-rgb out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-for-pose-neon-moved-pi.json 4 1`
+    - Pi result: `pose_count=1`, `detector_avg_ms=269.592`, `landmarker_avg_ms=190.806`, `frame_avg_ms=479.743`, `fps=2.084`.
+    - Voltage/throttling is still bad during this run: `vcgencmd get_throttled` reports `0x50005`, and `vcgencmd measure_clock arm` reports about `600 MHz`. Treat this timing as power-throttled, not as the best achieved runtime.
+    - Pi JSON compared against local C JSON:
+      - Image/world landmark counts all `1`.
+      - Pi vs local C max landmark-field delta: `8.225e-6` for image landmarks and `3.606e-6` for world landmarks.
+  - Current best clean benchmark remains the previous non-throttled retained 4-worker tracked smoke:
+    - `113.171 ms` tracked frame time, `8.836 FPS`; amortized `123.771 ms`, `8.079 FPS`.

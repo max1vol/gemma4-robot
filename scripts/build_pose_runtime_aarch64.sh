@@ -11,4 +11,4 @@ container run --rm --arch arm64 \
   -v "$ROOT:/work" \
   -w /work \
   "$IMAGE" \
-  /bin/bash -lc "gcc -Ofast -mcpu=cortex-a53 -DPOSE_USE_A53_PW6X8_ASM -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c scripts/pose_a53_pw6x8.S -o '$OUT' -lm -pthread"
+  /bin/bash -lc "gcc -Ofast -mcpu=cortex-a53 -DPOSE_USE_A53_PW6X8_ASM -std=c11 -Wall -Wextra -I out/pose_runtime_data pose_estimation/pose_runtime.c pose_estimation/a53_pw6x8.S -o '$OUT' -lm -pthread"

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """End-to-end image pipeline around the low-level pose model executor.
 
-This script is a validation harness: model inference is done by
-`pose_neon_runtime`, while Python keeps the image IO and MediaPipe-compatible
-postprocessing readable until it is ported into the target runtime.
+This script is a validation harness: model inference is done by the
+`pose_estimation/` C runtime binary passed on the command line, while Python
+keeps the image IO and MediaPipe-compatible postprocessing readable until it is
+ported into the target runtime.
 """
 
 from __future__ import annotations

@@ -912,7 +912,49 @@ static void conv2d_1x1_packed_tile(
     float32x4_t a30 = a00, a31 = a01;
     float32x4_t a40 = a00, a41 = a01;
     float32x4_t a50 = a00, a51 = a01;
-    for (int ci = 0; ci < in_c; ++ci) {
+    int ci = 0;
+    for (; ci + 3 < in_c; ci += 4) {
+      const float* wv = weights + (size_t)ci * 8;
+      float32x4_t s0v = vld1q_f32(s0 + ci);
+      float32x4_t s1v = vld1q_f32(s1 + ci);
+      float32x4_t s2v = vld1q_f32(s2 + ci);
+      float32x4_t s3v = vld1q_f32(s3 + ci);
+      float32x4_t s4v = vld1q_f32(s4 + ci);
+      float32x4_t s5v = vld1q_f32(s5 + ci);
+      float32x4_t w00 = vld1q_f32(wv + 0);
+      float32x4_t w01 = vld1q_f32(wv + 4);
+      float32x4_t w10 = vld1q_f32(wv + 8);
+      float32x4_t w11 = vld1q_f32(wv + 12);
+      float32x4_t w20 = vld1q_f32(wv + 16);
+      float32x4_t w21 = vld1q_f32(wv + 20);
+      float32x4_t w30 = vld1q_f32(wv + 24);
+      float32x4_t w31 = vld1q_f32(wv + 28);
+      a00 = vfmaq_laneq_f32(a00, w00, s0v, 0); a01 = vfmaq_laneq_f32(a01, w01, s0v, 0);
+      a10 = vfmaq_laneq_f32(a10, w00, s1v, 0); a11 = vfmaq_laneq_f32(a11, w01, s1v, 0);
+      a20 = vfmaq_laneq_f32(a20, w00, s2v, 0); a21 = vfmaq_laneq_f32(a21, w01, s2v, 0);
+      a30 = vfmaq_laneq_f32(a30, w00, s3v, 0); a31 = vfmaq_laneq_f32(a31, w01, s3v, 0);
+      a40 = vfmaq_laneq_f32(a40, w00, s4v, 0); a41 = vfmaq_laneq_f32(a41, w01, s4v, 0);
+      a50 = vfmaq_laneq_f32(a50, w00, s5v, 0); a51 = vfmaq_laneq_f32(a51, w01, s5v, 0);
+      a00 = vfmaq_laneq_f32(a00, w10, s0v, 1); a01 = vfmaq_laneq_f32(a01, w11, s0v, 1);
+      a10 = vfmaq_laneq_f32(a10, w10, s1v, 1); a11 = vfmaq_laneq_f32(a11, w11, s1v, 1);
+      a20 = vfmaq_laneq_f32(a20, w10, s2v, 1); a21 = vfmaq_laneq_f32(a21, w11, s2v, 1);
+      a30 = vfmaq_laneq_f32(a30, w10, s3v, 1); a31 = vfmaq_laneq_f32(a31, w11, s3v, 1);
+      a40 = vfmaq_laneq_f32(a40, w10, s4v, 1); a41 = vfmaq_laneq_f32(a41, w11, s4v, 1);
+      a50 = vfmaq_laneq_f32(a50, w10, s5v, 1); a51 = vfmaq_laneq_f32(a51, w11, s5v, 1);
+      a00 = vfmaq_laneq_f32(a00, w20, s0v, 2); a01 = vfmaq_laneq_f32(a01, w21, s0v, 2);
+      a10 = vfmaq_laneq_f32(a10, w20, s1v, 2); a11 = vfmaq_laneq_f32(a11, w21, s1v, 2);
+      a20 = vfmaq_laneq_f32(a20, w20, s2v, 2); a21 = vfmaq_laneq_f32(a21, w21, s2v, 2);
+      a30 = vfmaq_laneq_f32(a30, w20, s3v, 2); a31 = vfmaq_laneq_f32(a31, w21, s3v, 2);
+      a40 = vfmaq_laneq_f32(a40, w20, s4v, 2); a41 = vfmaq_laneq_f32(a41, w21, s4v, 2);
+      a50 = vfmaq_laneq_f32(a50, w20, s5v, 2); a51 = vfmaq_laneq_f32(a51, w21, s5v, 2);
+      a00 = vfmaq_laneq_f32(a00, w30, s0v, 3); a01 = vfmaq_laneq_f32(a01, w31, s0v, 3);
+      a10 = vfmaq_laneq_f32(a10, w30, s1v, 3); a11 = vfmaq_laneq_f32(a11, w31, s1v, 3);
+      a20 = vfmaq_laneq_f32(a20, w30, s2v, 3); a21 = vfmaq_laneq_f32(a21, w31, s2v, 3);
+      a30 = vfmaq_laneq_f32(a30, w30, s3v, 3); a31 = vfmaq_laneq_f32(a31, w31, s3v, 3);
+      a40 = vfmaq_laneq_f32(a40, w30, s4v, 3); a41 = vfmaq_laneq_f32(a41, w31, s4v, 3);
+      a50 = vfmaq_laneq_f32(a50, w30, s5v, 3); a51 = vfmaq_laneq_f32(a51, w31, s5v, 3);
+    }
+    for (; ci < in_c; ++ci) {
       const float* wv = weights + (size_t)ci * 8;
       float32x4_t w0v = vld1q_f32(wv + 0);
       float32x4_t w1v = vld1q_f32(wv + 4);
@@ -1061,7 +1103,49 @@ static void conv2d_1x1_packed_add_tile(
     float32x4_t a30 = a00, a31 = a01;
     float32x4_t a40 = a00, a41 = a01;
     float32x4_t a50 = a00, a51 = a01;
-    for (int ci = 0; ci < in_c; ++ci) {
+    int ci = 0;
+    for (; ci + 3 < in_c; ci += 4) {
+      const float* wv = weights + (size_t)ci * 8;
+      float32x4_t s0v = vld1q_f32(s0 + ci);
+      float32x4_t s1v = vld1q_f32(s1 + ci);
+      float32x4_t s2v = vld1q_f32(s2 + ci);
+      float32x4_t s3v = vld1q_f32(s3 + ci);
+      float32x4_t s4v = vld1q_f32(s4 + ci);
+      float32x4_t s5v = vld1q_f32(s5 + ci);
+      float32x4_t w00 = vld1q_f32(wv + 0);
+      float32x4_t w01 = vld1q_f32(wv + 4);
+      float32x4_t w10 = vld1q_f32(wv + 8);
+      float32x4_t w11 = vld1q_f32(wv + 12);
+      float32x4_t w20 = vld1q_f32(wv + 16);
+      float32x4_t w21 = vld1q_f32(wv + 20);
+      float32x4_t w30 = vld1q_f32(wv + 24);
+      float32x4_t w31 = vld1q_f32(wv + 28);
+      a00 = vfmaq_laneq_f32(a00, w00, s0v, 0); a01 = vfmaq_laneq_f32(a01, w01, s0v, 0);
+      a10 = vfmaq_laneq_f32(a10, w00, s1v, 0); a11 = vfmaq_laneq_f32(a11, w01, s1v, 0);
+      a20 = vfmaq_laneq_f32(a20, w00, s2v, 0); a21 = vfmaq_laneq_f32(a21, w01, s2v, 0);
+      a30 = vfmaq_laneq_f32(a30, w00, s3v, 0); a31 = vfmaq_laneq_f32(a31, w01, s3v, 0);
+      a40 = vfmaq_laneq_f32(a40, w00, s4v, 0); a41 = vfmaq_laneq_f32(a41, w01, s4v, 0);
+      a50 = vfmaq_laneq_f32(a50, w00, s5v, 0); a51 = vfmaq_laneq_f32(a51, w01, s5v, 0);
+      a00 = vfmaq_laneq_f32(a00, w10, s0v, 1); a01 = vfmaq_laneq_f32(a01, w11, s0v, 1);
+      a10 = vfmaq_laneq_f32(a10, w10, s1v, 1); a11 = vfmaq_laneq_f32(a11, w11, s1v, 1);
+      a20 = vfmaq_laneq_f32(a20, w10, s2v, 1); a21 = vfmaq_laneq_f32(a21, w11, s2v, 1);
+      a30 = vfmaq_laneq_f32(a30, w10, s3v, 1); a31 = vfmaq_laneq_f32(a31, w11, s3v, 1);
+      a40 = vfmaq_laneq_f32(a40, w10, s4v, 1); a41 = vfmaq_laneq_f32(a41, w11, s4v, 1);
+      a50 = vfmaq_laneq_f32(a50, w10, s5v, 1); a51 = vfmaq_laneq_f32(a51, w11, s5v, 1);
+      a00 = vfmaq_laneq_f32(a00, w20, s0v, 2); a01 = vfmaq_laneq_f32(a01, w21, s0v, 2);
+      a10 = vfmaq_laneq_f32(a10, w20, s1v, 2); a11 = vfmaq_laneq_f32(a11, w21, s1v, 2);
+      a20 = vfmaq_laneq_f32(a20, w20, s2v, 2); a21 = vfmaq_laneq_f32(a21, w21, s2v, 2);
+      a30 = vfmaq_laneq_f32(a30, w20, s3v, 2); a31 = vfmaq_laneq_f32(a31, w21, s3v, 2);
+      a40 = vfmaq_laneq_f32(a40, w20, s4v, 2); a41 = vfmaq_laneq_f32(a41, w21, s4v, 2);
+      a50 = vfmaq_laneq_f32(a50, w20, s5v, 2); a51 = vfmaq_laneq_f32(a51, w21, s5v, 2);
+      a00 = vfmaq_laneq_f32(a00, w30, s0v, 3); a01 = vfmaq_laneq_f32(a01, w31, s0v, 3);
+      a10 = vfmaq_laneq_f32(a10, w30, s1v, 3); a11 = vfmaq_laneq_f32(a11, w31, s1v, 3);
+      a20 = vfmaq_laneq_f32(a20, w30, s2v, 3); a21 = vfmaq_laneq_f32(a21, w31, s2v, 3);
+      a30 = vfmaq_laneq_f32(a30, w30, s3v, 3); a31 = vfmaq_laneq_f32(a31, w31, s3v, 3);
+      a40 = vfmaq_laneq_f32(a40, w30, s4v, 3); a41 = vfmaq_laneq_f32(a41, w31, s4v, 3);
+      a50 = vfmaq_laneq_f32(a50, w30, s5v, 3); a51 = vfmaq_laneq_f32(a51, w31, s5v, 3);
+    }
+    for (; ci < in_c; ++ci) {
       const float* wv = weights + (size_t)ci * 8;
       float32x4_t w0v = vld1q_f32(wv + 0);
       float32x4_t w1v = vld1q_f32(wv + 4);

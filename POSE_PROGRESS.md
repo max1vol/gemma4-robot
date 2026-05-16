@@ -211,6 +211,53 @@ End-to-end graph executor status:
     - 4 cores: detector `429.52 ms`, landmarker `186.30 ms`, frame `639.38 ms`, `1.56 FPS`.
   - Fetched the Pi `pipeline-rgb-rect` 4-core JSON and compared it with the Mac C full-pipeline JSON for the same rect. Max differences were float-order only: x `4.18e-7`, y `4.17e-7`, z `2.09e-6`.
   - This proves the current NEON camera strategy should be: run detector to acquire/reacquire, then run ROI-reuse landmarker frames at about 5 FPS on 4 cores or about 4.7 FPS on 3 cores. The missing production piece is still rect update/tracking across frames, not another one-shot detector benchmark.
+  - 2026-05-16 follow-up profile after the retained 5x5 depthwise work and before the next pointwise experiment:
+    - Command:
+      - `tailscale ssh max@pi3 'cd ~/gemma4-robot && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast ... detector ... && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast ... landmarker ... && ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-track-after-dw5-profile-t4.json 4 16'`
+    - Detector op totals: CONV2D `220.7 ms`, DEPTHWISE `99.5 ms`, RESIZE_BILINEAR `8.0 ms`, PAD `5.1 ms`; raw detector `340.2 ms`.
+    - Landmarker op totals: CONV2D `73.1 ms`, DEPTHWISE `57.1 ms`, RESIZE_BILINEAR `2.6 ms`; raw landmarker `134.3 ms`.
+    - 4-core tracked camera-style run: acquisition `302.5 ms`, landmarker `126.3 ms`, tracked frame `137.6 ms`, `7.27 FPS`; amortized with one acquisition over 16 frames `156.5 ms`, `6.39 FPS`.
+  - XNNPACK A53 6x8 calibration experiment:
+    - Temporary source-only experiment added a compile-time `POSE_USE_XNNPACK_A53_GEMM` path that called `xnn_f32_gemm_minmax_ukernel_6x8__asm_aarch64_neonfma_cortex_a53_prfm` for full `p_count=6`, `oc_count=8` pointwise tiles.
+    - Build command used for the experimental binary:
+      - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -DPOSE_USE_XNNPACK_A53_GEMM -std=c11 -Wall -Wextra -I out/pose_runtime_data -I research/xnnpack/XNNPACK scripts/pose_neon_runtime.c research/xnnpack/XNNPACK/src/f32-gemm/gen/f32-gemm-6x8-minmax-asm-aarch64-neonfma-cortex-a53-prfm.S -o out/pose_neon_runtime_aarch64_xnn6x8_fusedcal -lm -pthread'`
+    - Correctness on Pi still matched existing raw references:
+      - detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+      - landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.85882429e-14`, tensor 283 `5.188e-4`, tensor 312 `1.3589859e-05`.
+    - Selected `bench-op` result, default `ofast` vs XNN calibration:
+      - detector op 204, 3 threads: `18.91 ms` -> `13.28 ms`; 4 threads: `24.61 ms` -> `17.57 ms`.
+      - detector fused ops 123/124, 3 threads: `5.65 ms` -> `4.20 ms`; 4 threads: `6.60 ms` -> `5.26 ms`.
+      - detector fused ops 135/136, 3 threads: `5.71 ms` -> `4.57 ms`; 4 threads: `5.19 ms` -> `5.63 ms`.
+      - landmarker fused ops 116/117, 3 threads: `1.97 ms` -> `1.33 ms`; 4 threads: `3.27 ms` -> `1.21 ms`.
+      - landmarker fused ops 126/127, 3 threads: `1.99 ms` -> `1.31 ms`; 4 threads: `1.67 ms` -> `1.11 ms`.
+    - Raw full-model 3-repetition comparison, default `ofast` vs XNN calibration:
+      - 2 threads: detector `383.7 ms` -> `313.6 ms`; landmarker `180.8 ms` -> `163.0 ms`.
+      - 3 threads: detector `302.4 ms` -> `230.6 ms`; landmarker `146.1 ms` -> `117.8 ms`.
+      - 4 threads: detector `275.9 ms` -> `238.9 ms`; landmarker `130.1 ms` -> `127.4 ms`.
+    - Tracked-frame comparison, default `ofast` vs XNN calibration:
+      - 2 threads: tracked frame `181.5 ms`, `5.51 FPS` -> `160.6 ms`, `6.23 FPS`.
+      - 3 threads: tracked frame `142.5 ms`, `7.02 FPS` -> `128.9 ms`, `7.76 FPS`.
+      - 4 threads: tracked frame `138.1 ms`, `7.24 FPS` -> `127.0 ms`, `7.88 FPS`.
+    - The experimental output JSON for 4 threads matched the default C runtime final landmarks exactly (`0.0` diff in exported x/y/z and presence for `out/human-for-pose.rgb`).
+    - The temporary XNNPACK call path was removed from `scripts/pose_neon_runtime.c` before commit. It is calibration evidence only; the final runtime still does not link XNNPACK.
+  - Custom self-contained pointwise follow-up:
+    - Added a 4-input-channel unrolled path inside the default AArch64 `6 pixel x 8 channel` pointwise kernel, using `vfmaq_laneq_f32` so the full tile reuses four consecutive input scalars per row and eight loaded weight vectors per unrolled inner iteration.
+    - This is still plain custom C/NEON inside `scripts/pose_neon_runtime.c`; no XNNPACK/MediaPipe/TFLite/LiteRT/OpenCV/NumPy linkage.
+    - Correctness on Pi against raw references after rebuilding the normal `out/pose_neon_runtime_aarch64_ofast` binary:
+      - detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+      - landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.85882429e-14`, tensor 283 `5.188e-4`, tensor 312 `1.3589859e-05`.
+    - Raw full-model 3-repetition comparison before vs after the custom unroll:
+      - 2 threads: detector `381.0 ms` -> `368.9 ms`; landmarker `183.8 ms` -> `189.4 ms`; combined `564.8 ms` -> `558.3 ms`.
+      - 3 threads: detector `282.2 ms` -> `271.8 ms`; landmarker `142.7 ms` -> `142.7 ms`; combined `424.9 ms` -> `414.5 ms`.
+      - 4 threads: detector `279.4 ms` -> `266.8 ms`; landmarker `125.9 ms` -> `131.2 ms`; combined `405.4 ms` -> `398.0 ms`.
+    - Tracked-frame comparison before vs after the custom unroll, same Pi, 16 repetitions:
+      - 2 threads: `184.4 ms`, `5.42 FPS` -> `181.3 ms`, `5.51 FPS`.
+      - 3 threads: `146.9 ms`, `6.81 FPS` -> `142.7 ms`, `7.01 FPS`.
+      - 4 threads: `140.0 ms`, `7.15 FPS` -> `135.7 ms`, `7.37 FPS`.
+    - Final smoke after rebuilding the normal `ofast` binary from the cleaned source:
+      - 3 threads: tracked frame `145.6 ms`, `6.87 FPS`; amortized `166.0 ms`, `6.03 FPS`.
+      - 4 threads: tracked frame `138.9 ms`, `7.20 FPS`; amortized `157.4 ms`, `6.36 FPS`.
+    - Interpretation: the unroll is worth keeping because it gives a small end-to-end tracked-frame improvement while preserving correctness, but it captures only a fraction of the XNNPACK calibration gap. The next self-contained pointwise step should be a dedicated custom A53 assembly microkernel or a lower-register-pressure split kernel, not more random C-level unrolling.
 
 Persistent thread-pool prefix runner:
 

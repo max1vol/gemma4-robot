@@ -5,3 +5,4 @@ out/
 .env
 .env.*
 !.env.example
+research/xnnpack/XNNPACK/

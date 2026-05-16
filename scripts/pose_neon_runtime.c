@@ -684,6 +684,45 @@ static inline void fmaq8_depthwise_5x5s2_six_row(
   POSE_DW5S2_FMA6(4);
 #undef POSE_DW5S2_FMA6
 }
+
+static inline void fmaq8_depthwise_3x3s2_six_row(
+    float32x4_t* a0, float32x4_t* a1, float32x4_t* b0, float32x4_t* b1,
+    float32x4_t* c0, float32x4_t* c1, float32x4_t* d0, float32x4_t* d1,
+    float32x4_t* e0, float32x4_t* e1, float32x4_t* f0, float32x4_t* f1,
+    const float* row, const float* wrow, int c) {
+#define POSE_DW3S2_FMA6(K) do { \
+    float32x4_t w0 = vld1q_f32(wrow + (K) * c); \
+    float32x4_t w1 = vld1q_f32(wrow + (K) * c + 4); \
+    float32x4_t p0 = vld1q_f32(row + ((K) + 0) * c); \
+    float32x4_t p1 = vld1q_f32(row + ((K) + 0) * c + 4); \
+    *a0 = vfmaq_f32(*a0, p0, w0); \
+    *a1 = vfmaq_f32(*a1, p1, w1); \
+    p0 = vld1q_f32(row + ((K) + 2) * c); \
+    p1 = vld1q_f32(row + ((K) + 2) * c + 4); \
+    *b0 = vfmaq_f32(*b0, p0, w0); \
+    *b1 = vfmaq_f32(*b1, p1, w1); \
+    p0 = vld1q_f32(row + ((K) + 4) * c); \
+    p1 = vld1q_f32(row + ((K) + 4) * c + 4); \
+    *c0 = vfmaq_f32(*c0, p0, w0); \
+    *c1 = vfmaq_f32(*c1, p1, w1); \
+    p0 = vld1q_f32(row + ((K) + 6) * c); \
+    p1 = vld1q_f32(row + ((K) + 6) * c + 4); \
+    *d0 = vfmaq_f32(*d0, p0, w0); \
+    *d1 = vfmaq_f32(*d1, p1, w1); \
+    p0 = vld1q_f32(row + ((K) + 8) * c); \
+    p1 = vld1q_f32(row + ((K) + 8) * c + 4); \
+    *e0 = vfmaq_f32(*e0, p0, w0); \
+    *e1 = vfmaq_f32(*e1, p1, w1); \
+    p0 = vld1q_f32(row + ((K) + 10) * c); \
+    p1 = vld1q_f32(row + ((K) + 10) * c + 4); \
+    *f0 = vfmaq_f32(*f0, p0, w0); \
+    *f1 = vfmaq_f32(*f1, p1, w1); \
+  } while (0)
+  POSE_DW3S2_FMA6(0);
+  POSE_DW3S2_FMA6(1);
+  POSE_DW3S2_FMA6(2);
+#undef POSE_DW3S2_FMA6
+}
 #endif
 
 static int same_pad_before(int in, int out, int stride, int kernel, int dilation) {
@@ -2764,6 +2803,170 @@ static void depthwise_5x5s2_from_pad_tile_to_tmp(
   }
 }
 
+static void depthwise_3x3s2_from_pad_tile_to_tmp(
+    const float* input, const int32_t* pads, const float* weights, const float* bias,
+    float* tmp, size_t p0, int p_count, int in_h, int in_w, int out_w, int c,
+    int activation) {
+  const int top = pads[2], left = pads[4];
+  const int kh = 3, kw = 3, stride = 2;
+  int oy = (int)(p0 / (size_t)out_w);
+  int ox = (int)(p0 - (size_t)oy * out_w);
+  int py0 = oy * stride;
+  int px0 = ox * stride;
+#if defined(__aarch64__)
+  int last_px0 = (ox + p_count - 1) * stride;
+  if (p_count == 6 &&
+      py0 >= top && py0 + kh <= top + in_h &&
+      px0 >= left && last_px0 + kw <= left + in_w &&
+      ox + p_count <= out_w) {
+    const float* base = input + ((size_t)(py0 - top) * in_w + (px0 - left)) * c;
+    int ch = 0;
+    for (; ch + 8 <= c; ch += 8) {
+      float32x4_t a0 = vld1q_f32(bias + ch);
+      float32x4_t a1 = vld1q_f32(bias + ch + 4);
+      float32x4_t b0 = a0, b1 = a1;
+      float32x4_t c0 = a0, c1 = a1;
+      float32x4_t d0 = a0, d1 = a1;
+      float32x4_t e0 = a0, e1 = a1;
+      float32x4_t f0 = a0, f1 = a1;
+      for (int ky = 0; ky < kh; ++ky) {
+        fmaq8_depthwise_3x3s2_six_row(
+            &a0, &a1, &b0, &b1, &c0, &c1, &d0, &d1, &e0, &e1, &f0, &f1,
+            base + (size_t)ky * in_w * c + ch,
+            weights + (size_t)ky * kw * c + ch,
+            c);
+      }
+      a0 = activateq(a0, activation); a1 = activateq(a1, activation);
+      b0 = activateq(b0, activation); b1 = activateq(b1, activation);
+      c0 = activateq(c0, activation); c1 = activateq(c1, activation);
+      d0 = activateq(d0, activation); d1 = activateq(d1, activation);
+      e0 = activateq(e0, activation); e1 = activateq(e1, activation);
+      f0 = activateq(f0, activation); f1 = activateq(f1, activation);
+      vst1q_f32(tmp + 0 * c + ch, a0); vst1q_f32(tmp + 0 * c + ch + 4, a1);
+      vst1q_f32(tmp + 1 * c + ch, b0); vst1q_f32(tmp + 1 * c + ch + 4, b1);
+      vst1q_f32(tmp + 2 * c + ch, c0); vst1q_f32(tmp + 2 * c + ch + 4, c1);
+      vst1q_f32(tmp + 3 * c + ch, d0); vst1q_f32(tmp + 3 * c + ch + 4, d1);
+      vst1q_f32(tmp + 4 * c + ch, e0); vst1q_f32(tmp + 4 * c + ch + 4, e1);
+      vst1q_f32(tmp + 5 * c + ch, f0); vst1q_f32(tmp + 5 * c + ch + 4, f1);
+    }
+    for (; ch < c; ++ch) {
+      for (int pi = 0; pi < 6; ++pi) {
+        float acc = bias[ch];
+        const float* src = base + (size_t)(pi * stride) * c;
+        for (int ky = 0; ky < kh; ++ky) {
+          const float* row = src + (size_t)ky * in_w * c;
+          const float* wrow = weights + (size_t)ky * kw * c;
+          for (int kx = 0; kx < kw; ++kx) {
+            acc += row[(size_t)kx * c + ch] * wrow[(size_t)kx * c + ch];
+          }
+        }
+        tmp[(size_t)pi * c + ch] = activate(acc, activation);
+      }
+    }
+    return;
+  }
+#endif
+  for (int pi = 0; pi < p_count; ++pi) {
+    size_t p = p0 + (size_t)pi;
+    oy = (int)(p / (size_t)out_w);
+    ox = (int)(p - (size_t)oy * out_w);
+    py0 = oy * stride;
+    px0 = ox * stride;
+    float* dst = tmp + (size_t)pi * c;
+    int interior =
+        py0 >= top && px0 >= left &&
+        py0 + kh <= top + in_h &&
+        px0 + kw <= left + in_w;
+    int ch = 0;
+#if defined(__aarch64__)
+    for (; ch + 8 <= c; ch += 8) {
+      float32x4_t acc0 = vld1q_f32(bias + ch);
+      float32x4_t acc1 = vld1q_f32(bias + ch + 4);
+      if (interior) {
+        const float* base = input + ((size_t)(py0 - top) * in_w + (px0 - left)) * c;
+        for (int ky = 0; ky < kh; ++ky) {
+          const float* row = base + (size_t)ky * in_w * c;
+          const float* wrow = weights + (size_t)ky * kw * c;
+          for (int kx = 0; kx < kw; ++kx) {
+            fmaq8_at(&acc0, &acc1, row + (size_t)kx * c + ch, wrow + (size_t)kx * c + ch);
+          }
+        }
+      } else {
+        for (int ky = 0; ky < kh; ++ky) {
+          int iy = py0 + ky - top;
+          if ((unsigned)iy >= (unsigned)in_h) continue;
+          for (int kx = 0; kx < kw; ++kx) {
+            int ix = px0 + kx - left;
+            if ((unsigned)ix >= (unsigned)in_w) continue;
+            fmaq8_at(
+                &acc0, &acc1,
+                input + ((size_t)iy * in_w + ix) * c + ch,
+                weights + ((size_t)ky * kw + kx) * c + ch);
+          }
+        }
+      }
+      acc0 = activateq(acc0, activation);
+      acc1 = activateq(acc1, activation);
+      vst1q_f32(dst + ch, acc0);
+      vst1q_f32(dst + ch + 4, acc1);
+    }
+    for (; ch + 4 <= c; ch += 4) {
+      float32x4_t acc = vld1q_f32(bias + ch);
+      if (interior) {
+        const float* base = input + ((size_t)(py0 - top) * in_w + (px0 - left)) * c;
+        for (int ky = 0; ky < kh; ++ky) {
+          const float* row = base + (size_t)ky * in_w * c;
+          const float* wrow = weights + (size_t)ky * kw * c;
+          for (int kx = 0; kx < kw; ++kx) {
+            fmaq4_at(&acc, row + (size_t)kx * c + ch, wrow + (size_t)kx * c + ch);
+          }
+        }
+      } else {
+        for (int ky = 0; ky < kh; ++ky) {
+          int iy = py0 + ky - top;
+          if ((unsigned)iy >= (unsigned)in_h) continue;
+          for (int kx = 0; kx < kw; ++kx) {
+            int ix = px0 + kx - left;
+            if ((unsigned)ix >= (unsigned)in_w) continue;
+            fmaq4_at(
+                &acc,
+                input + ((size_t)iy * in_w + ix) * c + ch,
+                weights + ((size_t)ky * kw + kx) * c + ch);
+          }
+        }
+      }
+      acc = activateq(acc, activation);
+      vst1q_f32(dst + ch, acc);
+    }
+#endif
+    for (; ch < c; ++ch) {
+      float acc = bias[ch];
+      if (interior) {
+        const float* base = input + ((size_t)(py0 - top) * in_w + (px0 - left)) * c;
+        for (int ky = 0; ky < kh; ++ky) {
+          const float* row = base + (size_t)ky * in_w * c;
+          const float* wrow = weights + (size_t)ky * kw * c;
+          for (int kx = 0; kx < kw; ++kx) {
+            acc += row[(size_t)kx * c + ch] * wrow[(size_t)kx * c + ch];
+          }
+        }
+      } else {
+        for (int ky = 0; ky < kh; ++ky) {
+          int iy = py0 + ky - top;
+          if ((unsigned)iy >= (unsigned)in_h) continue;
+          for (int kx = 0; kx < kw; ++kx) {
+            int ix = px0 + kx - left;
+            if ((unsigned)ix >= (unsigned)in_w) continue;
+            acc += input[((size_t)iy * in_w + ix) * c + ch] *
+                weights[((size_t)ky * kw + kx) * c + ch];
+          }
+        }
+      }
+      dst[ch] = activate(acc, activation);
+    }
+  }
+}
+
 static void op_pad_depthwise_pointwise_tiles(PoseRuntime* rt, const PoseOpDef* pad_op, int item0, int item1) {
   const PoseOpDef* dw_op = rt->task_aux_op;
   const PoseOpDef* conv_op = dw_op + 1;
@@ -2774,6 +2977,7 @@ static void op_pad_depthwise_pointwise_tiles(PoseRuntime* rt, const PoseOpDef* p
   const PackedPointwiseX8* packed = (const PackedPointwiseX8*)rt->packed[conv_op->inputs[1]];
   float* output = (float*)rt->tensor[conv_op->outputs[0]];
   const PoseTensorDef* in = &rt->def->tensors[pad_op->inputs[0]];
+  const PoseTensorDef* dw_wt = &rt->def->tensors[dw_op->inputs[1]];
   const PoseTensorDef* dw_out = &rt->def->tensors[dw_op->outputs[0]];
   const PoseTensorDef* conv_out = &rt->def->tensors[conv_op->outputs[0]];
   int c = in->dims[3];
@@ -2788,9 +2992,15 @@ static void op_pad_depthwise_pointwise_tiles(PoseRuntime* rt, const PoseOpDef* p
     size_t p0 = (size_t)item * POSE_PW_TILE;
     int p_count = (int)(pixels - p0 < POSE_PW_TILE ? pixels - p0 : POSE_PW_TILE);
     float dw_tile[POSE_PW_TILE * POSE_DW_PW_MAX_C] __attribute__((aligned(64)));
-    depthwise_5x5s2_from_pad_tile_to_tmp(
-        input, pads, dw_weights, dw_bias, dw_tile,
-        p0, p_count, in->dims[1], in->dims[2], dw_out->dims[2], c, dw_op->activation);
+    if (dw_wt->dims[1] == 3 && dw_wt->dims[2] == 3) {
+      depthwise_3x3s2_from_pad_tile_to_tmp(
+          input, pads, dw_weights, dw_bias, dw_tile,
+          p0, p_count, in->dims[1], in->dims[2], dw_out->dims[2], c, dw_op->activation);
+    } else {
+      depthwise_5x5s2_from_pad_tile_to_tmp(
+          input, pads, dw_weights, dw_bias, dw_tile,
+          p0, p_count, in->dims[1], in->dims[2], dw_out->dims[2], c, dw_op->activation);
+    }
     float* output_tile = output + p0 * out_c;
     for (int oc_block = 0; oc_block < oc_blocks; ++oc_block) {
       int oc0 = oc_block * 8;
@@ -3524,8 +3734,12 @@ static int can_fuse_pad_depthwise_pointwise(const PoseRuntime* rt, int op_index)
   const PoseOpDef* pad_op = &rt->def->ops[op_index];
   const PoseOpDef* dw_op = &rt->def->ops[op_index + 1];
   const PoseOpDef* conv_op = &rt->def->ops[op_index + 2];
+  int is_landmarker_23 =
+      pad_op->index == 20 && dw_op->index == 23 && conv_op->index == 26;
+  int is_landmarker_49 =
+      pad_op->index == 46 && dw_op->index == 49 && conv_op->index == 52;
   if (strcmp(rt->def->name, "pose_landmarker") != 0 ||
-      pad_op->index != 46 || dw_op->index != 49 || conv_op->index != 52) {
+      (!is_landmarker_23 && !is_landmarker_49)) {
     return 0;
   }
   if (pad_op->op != POSE_OP_PAD || dw_op->op != POSE_OP_DEPTHWISE || conv_op->op != POSE_OP_CONV2D) return 0;
@@ -3549,7 +3763,9 @@ static int can_fuse_pad_depthwise_pointwise(const PoseRuntime* rt, int op_index)
     return 0;
   }
   if (in->dims[3] != padded->dims[3] || in->dims[3] != dw_out->dims[3]) return 0;
-  if (dw_wt->dims[0] != 1 || dw_wt->dims[1] != 5 || dw_wt->dims[2] != 5 || dw_wt->dims[3] != in->dims[3]) return 0;
+  if (dw_wt->dims[0] != 1 || dw_wt->dims[3] != in->dims[3]) return 0;
+  if (is_landmarker_23 && (dw_wt->dims[1] != 3 || dw_wt->dims[2] != 3)) return 0;
+  if (is_landmarker_49 && (dw_wt->dims[1] != 5 || dw_wt->dims[2] != 5)) return 0;
   if (conv_wt->dims[1] != 1 || conv_wt->dims[2] != 1 || conv_wt->dims[3] != dw_out->dims[3]) return 0;
   if (conv_out->dims[1] != dw_out->dims[1] || conv_out->dims[2] != dw_out->dims[2]) return 0;
   return 1;

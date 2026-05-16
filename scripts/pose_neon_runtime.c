@@ -11,6 +11,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <float.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -21,6 +22,18 @@
 
 #if defined(__aarch64__)
 #include <arm_neon.h>
+#endif
+
+#if defined(__aarch64__) && defined(POSE_USE_A53_PW6X8_ASM)
+typedef struct {
+  float min;
+  float max;
+} PoseF32MinMaxParams;
+
+void pose_f32_gemm_minmax_ukernel_6x8__asm_a53(
+    size_t mr, size_t nc, size_t kc, const float* a, size_t a_stride,
+    const float* w, float* c, size_t cm_stride, size_t cn_stride,
+    const PoseF32MinMaxParams* params);
 #endif
 
 #ifndef POSE_PW_TILE
@@ -312,6 +325,15 @@ static inline float32x4_t relu6q(float32x4_t v) {
 static inline float32x4_t activateq(float32x4_t v, int activation) {
   return activation == 3 ? relu6q(v) : v;
 }
+
+#if defined(POSE_USE_A53_PW6X8_ASM)
+static inline PoseF32MinMaxParams pose_minmax_params_for_activation(int activation) {
+  return (PoseF32MinMaxParams){
+      activation == 3 ? 0.0f : -FLT_MAX,
+      activation == 3 ? 6.0f : FLT_MAX,
+  };
+}
+#endif
 
 static inline void fmaq4_at(float32x4_t* acc, const float* src, const float* w) {
   *acc = vfmaq_f32(*acc, vld1q_f32(src), vld1q_f32(w));
@@ -861,6 +883,20 @@ static void conv2d_1x1_packed_tile(
   const float* bias = block;
   const float* weights = block + 8;
 #if defined(__aarch64__)
+  if (oc_count == 8 && p_count == 6) {
+#if defined(POSE_USE_A53_PW6X8_ASM)
+    PoseF32MinMaxParams params = pose_minmax_params_for_activation(activation);
+    pose_f32_gemm_minmax_ukernel_6x8__asm_a53(
+        6, 8, (size_t)in_c * sizeof(float),
+        input + p0 * in_c, (size_t)in_c * sizeof(float),
+        block,
+        output + p0 * out_c + oc0,
+        (size_t)out_c * sizeof(float),
+        8 * sizeof(float),
+        &params);
+    return;
+#endif
+  }
   if (oc_count == 8 && p_count == 4) {
     const float* s0 = input + (p0 + 0) * in_c;
     const float* s1 = input + (p0 + 1) * in_c;
@@ -1038,6 +1074,31 @@ static void conv2d_1x1_packed_add_tile(
   const float* bias = block;
   const float* weights = block + 8;
 #if defined(__aarch64__)
+  if (oc_count == 8 && p_count == 6) {
+#if defined(POSE_USE_A53_PW6X8_ASM)
+    float tmp[48] __attribute__((aligned(16)));
+    const PoseF32MinMaxParams params = {-FLT_MAX, FLT_MAX};
+    pose_f32_gemm_minmax_ukernel_6x8__asm_a53(
+        6, 8, (size_t)in_c * sizeof(float),
+        input + p0 * in_c, (size_t)in_c * sizeof(float),
+        block,
+        tmp,
+        8 * sizeof(float),
+        8 * sizeof(float),
+        &params);
+    for (int pi = 0; pi < 6; ++pi) {
+      const float* res = residual + (p0 + (size_t)pi) * out_c + oc0;
+      float* dst = output + (p0 + (size_t)pi) * out_c + oc0;
+      float32x4_t acc0 = vaddq_f32(vld1q_f32(tmp + (size_t)pi * 8), vld1q_f32(res));
+      float32x4_t acc1 = vaddq_f32(vld1q_f32(tmp + (size_t)pi * 8 + 4), vld1q_f32(res + 4));
+      acc0 = activateq(acc0, activation);
+      acc1 = activateq(acc1, activation);
+      vst1q_f32(dst, acc0);
+      vst1q_f32(dst + 4, acc1);
+    }
+    return;
+#endif
+  }
   if (oc_count == 8 && p_count == 4) {
     const float* s0 = input + (p0 + 0) * in_c;
     const float* s1 = input + (p0 + 1) * in_c;

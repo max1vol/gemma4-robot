@@ -258,6 +258,35 @@ End-to-end graph executor status:
       - 3 threads: tracked frame `145.6 ms`, `6.87 FPS`; amortized `166.0 ms`, `6.03 FPS`.
       - 4 threads: tracked frame `138.9 ms`, `7.20 FPS`; amortized `157.4 ms`, `6.36 FPS`.
     - Interpretation: the unroll is worth keeping because it gives a small end-to-end tracked-frame improvement while preserving correctness, but it captures only a fraction of the XNNPACK calibration gap. The next self-contained pointwise step should be a dedicated custom A53 assembly microkernel or a lower-register-pressure split kernel, not more random C-level unrolling.
+  - Local self-contained A53 `6x8` pointwise assembly path:
+    - Added `scripts/pose_a53_pw6x8.S`, a narrow local vendoring of the BSD-licensed XNNPACK Cortex-A53 `6x8` FP32 min/max GEMM microkernel, renamed and stripped of XNNPACK headers. The runtime links this one local microkernel file, not the XNNPACK operator library.
+    - Added guarded C integration behind `POSE_USE_A53_PW6X8_ASM` for full `p_count=6`, `oc_count=8` pointwise tiles.
+    - Standalone `1x1` tiles call the local assembly kernel directly with fused min/max activation.
+    - Fused `1x1 CONV2D -> ADD` tiles call the same local assembly kernel into a 6x8 stack tile, then add the residual and apply activation in NEON. This mirrors the successful calibration path and targets the tracked landmarker blocks.
+    - Added reproducible cross-build helper:
+      - `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_ofast`
+      - The script uses Apple `container`, `-Ofast -mcpu=cortex-a53`, `-DPOSE_USE_A53_PW6X8_ASM`, and links `scripts/pose_a53_pw6x8.S`.
+    - Raw tensor correctness on Pi after copying the script-built binary:
+      - detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+      - landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.85882429e-14`, tensor 283 `5.188e-4`, tensor 312 `1.3589859e-05`.
+    - Selected `bench-op` A/B, C/NEON unroll vs local A53 assembly:
+      - detector op 204: 2 threads `26.01 ms` -> `20.09 ms`; 3 threads `18.12 ms` -> `11.05 ms`; 4 threads `22.16 ms` -> `17.31 ms`.
+      - detector fused ops 123/124: 2 threads `7.74 ms` -> `5.61 ms`; 3 threads `5.40 ms` -> `3.69 ms`; 4 threads `6.37 ms` -> `3.47 ms`.
+      - detector fused ops 135/136: 2 threads `8.12 ms` -> `5.89 ms`; 3 threads `5.36 ms` -> `3.70 ms`; 4 threads `4.84 ms` -> `3.58 ms`.
+      - landmarker fused ops 116/117: 2 threads `2.73 ms` -> `1.82 ms`; 3 threads `2.03 ms` -> `1.30 ms`; 4 threads `3.52 ms` -> `2.19 ms`.
+      - landmarker fused ops 126/127: 2 threads `2.72 ms` -> `1.82 ms`; 3 threads `2.91 ms` -> `1.29 ms`; 4 threads `1.58 ms` -> `1.14 ms`.
+    - Raw full-model 3-repetition comparison, C/NEON unroll vs local A53 assembly:
+      - 2 threads: detector `371.4 ms` -> `315.8 ms`; landmarker `188.7 ms` -> `157.7 ms`; combined `560.1 ms` -> `473.5 ms`.
+      - 3 threads: detector `280.7 ms` -> `248.9 ms`; landmarker `141.0 ms` -> `130.9 ms`; combined `421.7 ms` -> `379.8 ms`.
+      - 4 threads: detector `281.4 ms` -> `255.3 ms`; landmarker `141.8 ms` -> `130.9 ms`; combined `423.2 ms` -> `386.2 ms`.
+    - Repeated tracked-frame A/B on `out/human-for-pose.rgb`, `reps=24`:
+      - 2 threads: tracked frame `181.0 ms`, `5.53 FPS` -> `159.1 ms`, `6.29 FPS`.
+      - 3 threads: tracked frame `143.6 ms`, `6.96 FPS` -> `130.0 ms`, `7.69 FPS`.
+      - 4 threads: tracked frame `136.9 ms`, `7.31 FPS` -> `125.9 ms`, `7.95 FPS`.
+    - Final smoke after replacing the Pi's `out/pose_neon_runtime_aarch64_ofast` with the script-built assembly binary:
+      - 4 threads: raw detector `302.1 ms` for a single measured rep; raw landmarker `128.8 ms`; tracked frame `126.6 ms`, `7.90 FPS`; amortized `142.8 ms`, `7.00 FPS`.
+    - The 4-thread tracked output JSON from the local assembly binary matched the C/NEON unroll JSON exactly (`0.0` diff in exported x/y/z and presence).
+    - Interpretation: this is the first retained pointwise change that captures most of the XNNPACK calibration win in the integrated tracked path while keeping the runtime small and not linking XNNPACK as a library. Remaining pointwise work should eliminate the fused-add stack tile by adding a true residual-add store path in the local assembly file.
 
 Persistent thread-pool prefix runner:
 

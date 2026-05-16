@@ -1,22 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-XNNPACK_DIR="$ROOT/research/xnnpack/XNNPACK"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+BENCH_DIR="$ROOT/pose_estimation/research/benchmarks/vs_xnnpack"
+XNNPACK_DIR="$BENCH_DIR/XNNPACK"
 IMAGE="gemma4-xnnpack-build:bookworm-arm64"
 BUILD_DIR="build/container-aarch64-release"
+
+if [[ ! -d "$XNNPACK_DIR" ]]; then
+  echo "Missing $XNNPACK_DIR" >&2
+  echo "Clone XNNPACK with: git clone --depth 1 https://github.com/google/XNNPACK.git '$XNNPACK_DIR'" >&2
+  exit 1
+fi
 
 if ! container image list | awk '{print $1 ":" $2}' | grep -qx "$IMAGE"; then
   container build \
     --arch arm64 \
     --tag "$IMAGE" \
-    --file "$ROOT/research/xnnpack/Containerfile" \
-    "$ROOT/research/xnnpack"
+    --file "$BENCH_DIR/Containerfile" \
+    "$BENCH_DIR"
 fi
 
 container run --rm --arch arm64 \
   -v "$ROOT:/work" \
-  -w "/work/research/xnnpack/XNNPACK" \
+  -w "/work/pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK" \
   "$IMAGE" \
   /bin/bash -lc "
     set -euo pipefail

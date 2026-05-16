@@ -2,7 +2,7 @@
 
 This directory contains a shallow clone of the official Google XNNPACK source:
 
-- Source: `research/xnnpack/XNNPACK`
+- Source: `pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK`
 - Remote: `https://github.com/google/XNNPACK.git`
 - Inspected commit: `1c292bfc98d0bc412721c335e72f7a188e436c8c`
 
@@ -28,13 +28,13 @@ loops.
 
 ## Relevant XNNPACK Source Files
 
-- `research/xnnpack/XNNPACK/src/configs/gemm-config.c`
-- `research/xnnpack/XNNPACK/src/operators/convolution-nhwc.c`
-- `research/xnnpack/XNNPACK/src/operator-run.c`
-- `research/xnnpack/XNNPACK/src/indirection.c`
-- `research/xnnpack/XNNPACK/src/f32-gemm/gen/f32-gemm-6x8-minmax-asm-aarch64-neonfma-cortex-a53-prfm.S`
-- `research/xnnpack/XNNPACK/src/f32-gemm/gen/f32-gemm-4x8-minmax-asm-aarch64-neonfma-cortex-a53-prfm.S`
-- `research/xnnpack/XNNPACK/src/f32-gemm/gen/f32-gemm-1x8-minmax-asm-aarch64-neonfma-cortex-a53-prfm.S`
+- `pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK/src/configs/gemm-config.c`
+- `pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK/src/operators/convolution-nhwc.c`
+- `pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK/src/operator-run.c`
+- `pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK/src/indirection.c`
+- `pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK/src/f32-gemm/gen/f32-gemm-6x8-minmax-asm-aarch64-neonfma-cortex-a53-prfm.S`
+- `pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK/src/f32-gemm/gen/f32-gemm-4x8-minmax-asm-aarch64-neonfma-cortex-a53-prfm.S`
+- `pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK/src/f32-gemm/gen/f32-gemm-1x8-minmax-asm-aarch64-neonfma-cortex-a53-prfm.S`
 
 ## Cortex-A53 FP32 GEMM Configuration
 

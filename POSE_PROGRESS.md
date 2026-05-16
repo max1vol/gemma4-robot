@@ -2,22 +2,19 @@
 
 ## Goal Amendment
 
-Optimize the same computation as the official MediaPipe Pose Landmarker Lite model on Raspberry Pi 3B+ for real-time camera use. Allowed low-level paths are:
+Optimize the same computation as the official MediaPipe Pose Landmarker Lite model on Raspberry Pi 3B+ for real-time camera use. The current implementation target is pure NEON on CPU only:
 
-1. GPU-only using GLES2 fragment-shader compute under `vc4-kms-v3d`.
-2. Pure NEON on 2 CPU cores.
-3. Pure NEON on 3 CPU cores.
-4. Pure NEON on 4 CPU cores.
+1. Pure NEON on 2 CPU cores.
+2. Pure NEON on 3 CPU cores.
+3. Pure NEON on 4 CPU cores.
 
-Do not use raw QPU, VC4CL, or other low-level GPU paths because Chromium kiosk must run at the same time.
-Combined GPU+NEON runtime mode was explicitly dropped on 2026-05-16. GPU readback remains acceptable for validation only, not as a candidate runtime split.
+GPU runtime work was dropped on 2026-05-16. Do not pursue GLES2, raw QPU, VC4CL, or combined GPU+NEON runtime modes for this task.
 
 The priority order was revised on 2026-05-16:
 
 1. First get pure NEON working end-to-end, including pose estimation outputs, not only isolated network prefixes.
 2. Validate the NEON path on `out/human-for-pose.png` against official MediaPipe output run on this laptop.
-3. Push the validated NEON code to GitHub.
-4. Then port to GPU-only GLES2, measure it, run it on the same image, compare/fix against the official output, and push again.
+3. Push the validated NEON code and report artifacts to GitHub.
 
 Progress, plans, experiments, and results should be kept here. A fresh-context subagent should be launched at least every 10 minutes during long runs to suggest new ideas and check whether the main work is cycling without progress.
 
@@ -68,12 +65,13 @@ End-to-end graph executor status:
   - `scripts/pose_tflite_inventory.py`
   - `scripts/extract_pose_runtime_data.py`
   - `scripts/pose_litert_reference.py`
-  - `scripts/pose_neon_runtime.c`
+  - `pose_estimation/pose_runtime.c`
+  - `pose_estimation/a53_pw6x8.S`
   - `scripts/pose_official_image_ref.py`
   - `scripts/pose_official_debug_dump.py`
   - `scripts/pose_runtime_pipeline.py`
 - Offline extraction now folds constant `DEQUANTIZE` and `DENSIFY` ops out of the target runtime and writes flat C model plans plus raw constant blobs in `out/pose_runtime_data`.
-- XNNPACK reference notes were added in `research/xnnpack/HANDOFF.md` from a shallow clone of official Google XNNPACK. The important borrowed design points are weight packing, output-channel tiles of 8, Cortex-A53-specific pointwise GEMM kernels, fused min/max activation, and persistent worker threads. We are not linking XNNPACK; this is being used as a microkernel design reference.
+- XNNPACK reference notes live in `pose_estimation/research/benchmarks/vs_xnnpack/HANDOFF.md` from a shallow clone of official Google XNNPACK. The important borrowed design points are weight packing, output-channel tiles of 8, Cortex-A53-specific pointwise GEMM kernels, fused min/max activation, and persistent worker threads. We are not linking XNNPACK; this is being used as a microkernel design reference.
 - Target runtime does not link MediaPipe, TensorFlow Lite, LiteRT, OpenCV, or NumPy. It consumes generated model plans and constants and executes supported graph ops directly.
 - Supported runtime ops currently cover both official models:
   - detector: `CONV_2D`, `DEPTHWISE_CONV_2D`, `ADD`, `PAD`, `RESIZE_BILINEAR`, `DEPTH_TO_SPACE`, `RESHAPE`, `CONCATENATION`.
@@ -1682,3 +1680,27 @@ End-to-end NEON reference path:
       - Pi vs local C max landmark-field delta: `8.225e-6` for image landmarks and `3.606e-6` for world landmarks.
   - Current best clean benchmark remains the previous non-throttled retained 4-worker tracked smoke:
     - `113.171 ms` tracked frame time, `8.836 FPS`; amortized `123.771 ms`, `8.079 FPS`.
+
+- 2026-05-16 tracked report and research relocation:
+  - Added a detailed GitHub-rendered report:
+    - `pose_estimation/REPORT.md`
+    - `pose_estimation/report_assets/official_vs_neon_overlay.png`
+    - `pose_estimation/report_assets/raw_full_model_latency_progression.png`
+    - `pose_estimation/report_assets/tracked_frame_latency_progression.png`
+    - `pose_estimation/report_assets/final_fusion_worker_scaling.png`
+    - `pose_estimation/report_assets/official_vs_custom_latency.png`
+    - `pose_estimation/report_assets/validity_deltas.png`
+  - The overlay PNG was copied out of ignored `out/` into tracked report assets so GitHub can render it.
+  - The report now explains:
+    - official MediaPipe Pi measurements observed earlier,
+    - raw full-model latency progression,
+    - tracked camera-frame latency progression,
+    - retained and rejected optimizations,
+    - raw tensor correctness checks,
+    - final landmark deltas against fresh official MediaPipe on `out/human-for-pose.png`,
+    - Pi-vs-local C output deltas,
+    - current Pi undervoltage/throttling caveat.
+  - Moved XNNPACK comparison material from `research/xnnpack/` to:
+    - `pose_estimation/research/benchmarks/vs_xnnpack/`
+  - Added `pose_estimation/research/benchmarks/vs_xnnpack/README.md` explaining that this area is for XNNPACK benchmark calibration only, how to clone the ignored upstream `XNNPACK/` tree, how to build with Apple `container`, and how to run the shape benchmarks on the Pi.
+  - Updated moved helper scripts to use the new path and updated `.gitignore` so the large upstream `XNNPACK/` clone remains local/ignored.

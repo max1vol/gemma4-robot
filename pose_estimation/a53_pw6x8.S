@@ -13,7 +13,7 @@
 //
 // This source code is licensed under the BSD-style license found in the
 // original XNNPACK source tree. In this checkout that license text is available
-// at research/xnnpack/XNNPACK/LICENSE.
+// at pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK/LICENSE.
 
 #if defined(__ELF__)
   .macro BEGIN_FUNCTION name

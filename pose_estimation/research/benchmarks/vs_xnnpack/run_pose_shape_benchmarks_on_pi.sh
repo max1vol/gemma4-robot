@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-BUILD_DIR="$ROOT/research/xnnpack/XNNPACK/build/container-aarch64-release"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+BENCH_DIR="$ROOT/pose_estimation/research/benchmarks/vs_xnnpack"
+BUILD_DIR="$BENCH_DIR/XNNPACK/build/container-aarch64-release"
 REMOTE="max@pi3"
 REMOTE_DIR="~/gemma4-robot/xnnpack-release-bench"
 
@@ -31,13 +32,13 @@ run_remote() {
 }
 
 run_remote bench/f32-conv-hwc-bench 256 256 3 3 1 1 2 1 3 24 \
-  | tee "$ROOT/research/xnnpack/pi_f32_conv_hwc_op3.txt"
+  | tee "$BENCH_DIR/pi_f32_conv_hwc_op3.txt"
 
 run_remote bench/f32-dwconv-bench 128 128 3 3 1 1 1 1 24 \
-  | tee "$ROOT/research/xnnpack/pi_f32_dwconv_op6.txt"
+  | tee "$BENCH_DIR/pi_f32_dwconv_op6.txt"
 
 run_remote bench/f32-gemm-bench 16384 8 24 16384 32 8 16384 8 8 4096 16 32 \
-  | tee "$ROOT/research/xnnpack/pi_f32_gemm_pose_pointwise.txt"
+  | tee "$BENCH_DIR/pi_f32_gemm_pose_pointwise.txt"
 
 run_remote bench/subgraph/subgraph-mobilenet-bench --benchmark_filter='MobileNetV2/f32' \
-  | tee "$ROOT/research/xnnpack/pi_subgraph_mobilenet_v2.txt"
+  | tee "$BENCH_DIR/pi_subgraph_mobilenet_v2.txt"

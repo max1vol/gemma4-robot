@@ -5,4 +5,4 @@ out/
 .env
 .env.*
 !.env.example
-research/xnnpack/XNNPACK/
+pose_estimation/research/benchmarks/vs_xnnpack/XNNPACK/

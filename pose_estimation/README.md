@@ -14,3 +14,8 @@ Build the Pi binary from the repo root with:
 ```sh
 scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_ofast
 ```
+
+The current detailed optimization report, measurements, charts, and validation
+overlay are in [`REPORT.md`](REPORT.md). XNNPACK comparison material lives under
+`research/benchmarks/vs_xnnpack/` as calibration/reference data only; it is not
+linked into the runtime.

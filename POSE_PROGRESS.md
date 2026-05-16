@@ -1506,3 +1506,48 @@ End-to-end NEON reference path:
   - Final decision:
     - Rejected both `058->061->062` attempts. Correctness was fine, but neither implementation beat the retained separated path across 2/3/4 workers.
     - Next better candidates: either `049 PAD->DEPTHWISE->052 CONV2D` with a direct padded-depthwise scratch producer, or a smaller worker-dispatch/scheduling measurement before adding more scratch-producing fusions. Do not retry `058->061->062` with another scratch-only variant unless it materially avoids the intermediate scratch cost.
+
+- 2026-05-16 retained landmarker `046->049->052` fused `PAD->DEPTHWISE->CONV2D` tile path:
+  - Motivation:
+    - This is the follow-up candidate identified after rejecting the `058->061->062` scratch-only fusion. Landmarker `046 PAD` feeds only `049 DEPTHWISE`, and `049` feeds only `052 CONV2D`, so the padded `[1,68,68,96]` tensor and the depthwise `[1,32,32,96]` tensor can be skipped for this fixed graph section.
+    - The target shape is exact: pad top/left/bottom/right by 2, then 5x5 stride-2 depthwise with ReLU6 over `96` channels, then packed 1x1 pointwise to `24` channels.
+  - Implementation:
+    - Added a narrow `can_fuse_pad_depthwise_pointwise` guard for `pose_landmarker` ops `046/049/052` only, with `POSE_FUSE_PAD_DW_PW=0` as an escape hatch.
+    - Added a fused tile worker that computes a `POSE_PW_TILE x 96` depthwise scratch tile directly from the original unpadded input, then immediately runs the existing packed 1x1 tile path for all output-channel blocks.
+    - Added an AArch64 fast path for six same-row interior stride-2 output pixels using `fmaq8_depthwise_5x5s2_six_row`; border and short-tail tiles fall back to checked per-pixel code.
+    - Added `bench-op` support for the fused triplet so requests for op `46`, `49`, or `52` can time the fused chain.
+  - Build and local correctness:
+    - Passed `git diff --check`.
+    - Local build passed:
+      - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_pad49_local -lm -pthread`
+    - Cross-build passed:
+      - `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_ofast`
+    - Local landmarker outputs with the fusion enabled and disabled matched byte-for-byte for tensors `283`, `310`, `312`, and `315`.
+  - Pi raw correctness and isolated fused-op timing:
+    - Candidate binary before final install: `out/pose_neon_runtime_aarch64_pad_dwpw49`, sha256 `2b38c237a1a16c9d12736fc7b9304344d363852e151bac3dd879e3bb63dd6a16`.
+    - Detector 4-thread single rep: `293.161 ms`; tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`.
+    - Landmarker 4-thread single rep: `119.760 ms`; tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+    - Targeted same-binary `bench-op 49`, old separated path forced with `POSE_FUSE_PAD_DW_PW=0`, `reps=50`, `warmup=6`:
+      - 2 workers: old `049` `9.503 ms` + old `052` `0.896 ms` = `10.398 ms`; fused `8.727 ms`.
+      - 3 workers: old `7.424 ms` + `0.641 ms` = `8.064 ms`; fused `6.369 ms`.
+      - 4 workers: old `7.406 ms` + `0.576 ms` = `7.982 ms`; fused `6.495 ms`.
+  - Integrated tracked A/B on `out/human-for-pose.rgb`, `514x994`, `reps=48`, `refresh_interval=0`, current retained `ofast` vs candidate:
+    - Initial continuous run started under `vcgencmd get_throttled=0x50005`.
+      - Repeat 1: 2 workers `146.057 -> 144.919 ms`; 3 workers `119.998 -> 119.257 ms`; 4 workers `116.564 -> 115.606 ms`.
+      - Repeat 2 completed for 2 and 3 workers: 2 workers `145.663 -> 144.913 ms`; 3 workers `120.462 -> 118.312 ms`.
+      - The Pi rebooted during repeat 2's old 4-worker run. After reboot, `uptime` was about one minute and `dmesg` reported `Undervoltage detected!`, so that interrupted benchmark was discarded as a board/power failure, not a candidate runtime result.
+    - Rerun in shorter batches:
+      - Batch A: 2 workers `147.809 -> 146.344 ms`; 3 workers `121.757 -> 120.543 ms`; 4 workers `119.334 -> 121.788 ms` (4-worker regression).
+      - Batch B, 4 workers: `117.641 -> 116.305 ms`.
+      - Batch C, reversed order, 4 workers, `reps=72`: candidate `116.632 ms`; old second `117.508 ms`.
+    - Exported tracked JSON matched exactly in every completed batch and worker mode: `0.0` max abs over `355` numeric fields.
+  - Final default binary refresh:
+    - Rebuilt `out/pose_neon_runtime_aarch64_ofast`, copied it to the Pi, and installed it over the retained binary.
+    - Pi sha256 for refreshed `ofast`: `9dace9b3adbfd0aca769f399e92def456434f68effb44ba67bf934661c79ff3e`.
+    - Final raw tensor smoke with default binary:
+      - Detector 4-thread single rep: `257.774 ms`; tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`.
+      - Landmarker 4-thread single rep: `148.933 ms`; tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.359e-5`.
+    - Final 4-worker tracked smoke, `reps=48`, `refresh_interval=0`: tracked frame `117.137 ms`, `8.537 FPS`; amortized `123.478 ms`, `8.099 FPS`.
+  - Decision:
+    - Retained. The isolated fused chain is a clear 2/3/4-worker win, the tracked path improves in all completed 2- and 3-worker A/B runs, and 4-worker improves in the initial run plus two follow-up checks including reversed-order `reps=72`.
+    - The single batch-A 4-worker regression is recorded as residual Pi noise around an under-voltage/reboot window. Future changes should keep using repeated tracked A/B and should not stack on this pattern unless they beat the tracked path, not only the fused op.

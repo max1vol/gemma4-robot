@@ -3549,8 +3549,9 @@ static int run_pipeline_rgb_rect(
 
 static int run_pipeline_rgb_track(
     const char* data_dir, const char* rgb_path, int image_w, int image_h,
-    const char* out_json, int threads, int reps) {
+    const char* out_json, int threads, int reps, int refresh_interval) {
   if (reps < 1) reps = 1;
+  if (refresh_interval < 0) refresh_interval = 0;
   uint8_t* rgb = read_rgb24(rgb_path, image_w, image_h);
   float* detector_input = (float*)xaligned_alloc(64, (size_t)224 * 224 * 3 * sizeof(float));
   float* landmarker_input = (float*)xaligned_alloc(64, (size_t)256 * 256 * 3 * sizeof(float));
@@ -3571,6 +3572,8 @@ static int run_pipeline_rgb_track(
   float presence = 0.0f;
   int pose_count = 0;
   double acquire_ms = 0.0, sample_ms = 0.0, lm_ms = 0.0, frame_ms = 0.0;
+  int detector_runs = 0;
+  int need_acquire = 0;
 
   double acquire_t0 = now_s();
   Letterbox lb = resize_letterbox_rgb(rgb, image_w, image_h, 224, detector_input);
@@ -3592,10 +3595,33 @@ static int run_pipeline_rgb_track(
     return 0;
   }
   acquire_ms = (now_s() - acquire_t0) * 1000.0;
+  detector_runs = 1;
   rect = rect_from_detection_c(&det, image_w, image_h);
   next_rect = rect;
 
   for (int rep = 0; rep < reps; ++rep) {
+    if (rep > 0 && (need_acquire || (refresh_interval > 0 && rep % refresh_interval == 0))) {
+      double refresh_t0 = now_s();
+      lb = resize_letterbox_rgb(rgb, image_w, image_h, 224, detector_input);
+      memcpy(detector_rt.tensor[pose_detector_model.inputs[0]], detector_input, (size_t)224 * 224 * 3 * sizeof(float));
+      run_model(&detector_rt, 0);
+      if (!decode_best_detection(
+              (const float*)detector_rt.tensor[441],
+              (const float*)detector_rt.tensor[429],
+              lb,
+              &det)) {
+        acquire_ms += (now_s() - refresh_t0) * 1000.0;
+        detector_runs++;
+        pose_count = 0;
+        need_acquire = 1;
+        continue;
+      }
+      acquire_ms += (now_s() - refresh_t0) * 1000.0;
+      detector_runs++;
+      rect = rect_from_detection_c(&det, image_w, image_h);
+      next_rect = rect;
+      need_acquire = 0;
+    }
     double frame_t0 = now_s();
     used_rect = rect;
     double sample_t0 = frame_t0;
@@ -3613,14 +3639,23 @@ static int run_pipeline_rgb_track(
     decode_world_c((const float*)landmarker_rt.tensor[312], internal, &used_rect, world_lm);
     presence = ((const float*)landmarker_rt.tensor[315])[0];
     next_rect = rect_from_aux_landmarks_c(internal, &used_rect, image_w, image_h);
-    if (presence >= 0.5f && rect_is_usable(&next_rect)) rect = next_rect;
+    if (presence >= 0.5f && rect_is_usable(&next_rect)) {
+      rect = next_rect;
+      need_acquire = 0;
+    } else {
+      need_acquire = 1;
+    }
     frame_ms += (now_s() - frame_t0) * 1000.0;
     pose_count = 1;
   }
 
-  write_pipeline_json(out_json, pose_count, &det, &used_rect, &next_rect, presence, pose_lm, world_lm);
-  printf("pipeline_rgb_track pose_count=%d threads=%d reps=%d acquire_ms=%.3f sample_avg_ms=%.3f landmarker_avg_ms=%.3f tracked_frame_avg_ms=%.3f tracked_fps=%.3f amortized_frame_ms=%.3f amortized_fps=%.3f final_presence=%.6g\n",
-      pose_count, threads, reps, acquire_ms, sample_ms / (double)reps, lm_ms / (double)reps,
+  if (!pose_count) {
+    write_pipeline_json(out_json, 0, NULL, NULL, NULL, 0.0f, NULL, NULL);
+  } else {
+    write_pipeline_json(out_json, pose_count, &det, &used_rect, &next_rect, presence, pose_lm, world_lm);
+  }
+  printf("pipeline_rgb_track pose_count=%d threads=%d reps=%d refresh_interval=%d detector_runs=%d acquire_ms=%.3f sample_avg_ms=%.3f landmarker_avg_ms=%.3f tracked_frame_avg_ms=%.3f tracked_fps=%.3f amortized_frame_ms=%.3f amortized_fps=%.3f final_presence=%.6g\n",
+      pose_count, threads, reps, refresh_interval, detector_runs, acquire_ms, sample_ms / (double)reps, lm_ms / (double)reps,
       frame_ms / (double)reps, 1000.0 * (double)reps / frame_ms,
       (frame_ms + acquire_ms) / (double)reps, 1000.0 * (double)reps / (frame_ms + acquire_ms), presence);
 
@@ -3678,14 +3713,15 @@ int main(int argc, char** argv) {
   if (argc >= 2 && strcmp(argv[1], "pipeline-rgb-track") == 0) {
     if (argc < 7) {
       fprintf(stderr,
-              "usage: %s pipeline-rgb-track <data_dir> <rgb24.bin> <width> <height> <out.json> [threads] [reps]\n",
+              "usage: %s pipeline-rgb-track <data_dir> <rgb24.bin> <width> <height> <out.json> [threads] [reps] [refresh_interval]\n",
               argv[0]);
       return 2;
     }
     int threads = argc > 7 ? atoi(argv[7]) : 1;
     int reps = argc > 8 ? atoi(argv[8]) : 1;
+    int refresh_interval = argc > 9 ? atoi(argv[9]) : 0;
     if (threads < 1) threads = 1;
-    return run_pipeline_rgb_track(argv[2], argv[3], atoi(argv[4]), atoi(argv[5]), argv[6], threads, reps);
+    return run_pipeline_rgb_track(argv[2], argv[3], atoi(argv[4]), atoi(argv[5]), argv[6], threads, reps, refresh_interval);
   }
   if (argc < 5) {
     fprintf(stderr,
@@ -3699,7 +3735,7 @@ int main(int argc, char** argv) {
             "       %s pipeline-rgb-rect <data_dir> <rgb24.bin> <width> <height> <x_center> <y_center> <rect_w> <rect_h> <rotation> <out.json> [threads] [reps]\n",
             argv[0]);
     fprintf(stderr,
-            "       %s pipeline-rgb-track <data_dir> <rgb24.bin> <width> <height> <out.json> [threads] [reps]\n",
+            "       %s pipeline-rgb-track <data_dir> <rgb24.bin> <width> <height> <out.json> [threads] [reps] [refresh_interval]\n",
             argv[0]);
     return 2;
   }

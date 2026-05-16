@@ -287,6 +287,79 @@ End-to-end graph executor status:
       - 4 threads: raw detector `302.1 ms` for a single measured rep; raw landmarker `128.8 ms`; tracked frame `126.6 ms`, `7.90 FPS`; amortized `142.8 ms`, `7.00 FPS`.
     - The 4-thread tracked output JSON from the local assembly binary matched the C/NEON unroll JSON exactly (`0.0` diff in exported x/y/z and presence).
     - Interpretation: this is the first retained pointwise change that captures most of the XNNPACK calibration win in the integrated tracked path while keeping the runtime small and not linking XNNPACK as a library. Remaining pointwise work should eliminate the fused-add stack tile by adding a true residual-add store path in the local assembly file.
+  - 2026-05-16 post-local-A53 profile and rejected follow-up experiments:
+    - Current retained 4-core profile command:
+      - `tailscale ssh max@pi3 'cd ~/gemma4-robot && rm -rf /tmp/pose-profile-current-det /tmp/pose-profile-current-lm && mkdir -p /tmp/pose-profile-current-det /tmp/pose-profile-current-lm && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-profile-current-det 4 1 out/pose_runtime_test_detector/ref && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-profile-current-lm 4 1 out/pose_runtime_test_noseg/ref && ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-track-current-profile-t4.json 4 16'`
+    - Detector retained profile totals: CONV2D `171.6 ms`, DEPTHWISE `101.9 ms`, RESIZE_BILINEAR `6.7 ms`, PAD `5.6 ms`; raw detector `294.0 ms`.
+    - Detector top ops are now detector `204 CONV2D 20.9 ms`, depthwise ops `029/053/042/119/131` around `8.5-9.5 ms`, then small pointwise/head ops around `5-6 ms`.
+    - Landmarker retained profile totals: CONV2D `66.2 ms`, DEPTHWISE `58.7 ms`, RESIZE_BILINEAR `2.9 ms`; raw landmarker `129.1 ms`.
+    - Landmarker top ops are now `049 DEPTHWISE 8.0 ms`, first conv `003 CONV2D 7.7 ms`, `032 DEPTHWISE 7.5 ms`, `006 DEPTHWISE 6.3 ms`, `012 CONV2D 6.3 ms`, and `058 DEPTHWISE 5.8 ms`.
+    - Current retained 4-core tracked sanity in that profile run: acquisition `282.7 ms`, sample `9.4 ms`, landmarker `116.3 ms`, tracked frame `127.4 ms`, `7.85 FPS`.
+    - Rejected direct residual-add assembly experiment:
+      - Added a second local A53 assembly entry point that loaded six residual rows, added them to the 6x8 GEMM accumulators before clamp/store, and wired it into `conv2d_1x1_packed_add_tile`.
+      - Correctness stayed in the same raw tensor range.
+      - Ungated direct-add tracked A/B, `reps=16`, two repeats:
+        - 2 threads: retained `159.8/160.2 ms`; direct-add `161.4/161.8 ms`.
+        - 3 threads: retained `130.0/130.4 ms`; direct-add `127.3/131.2 ms`.
+        - 4 threads: retained `126.0/126.3 ms`; direct-add `124.9/124.7 ms`.
+      - Gating direct-add to `threads >= 4` accidentally exposed that the disabled path had fallen back to C/NEON rather than the assembly stack-tile path; after fixing that fallback, repeated tracked A/B was still not reliable:
+        - 2 threads: retained `157.9/160.0 ms`; gated direct-add `161.2/160.0 ms`.
+        - 3 threads: retained `132.5/128.9 ms`; gated direct-add `128.0/131.6 ms`.
+        - 4 threads: retained `126.0/126.8 ms`; gated direct-add `125.4/128.6 ms`.
+      - Reverted. The direct-add path was correct but not a strong enough tracked-frame win to justify doubling the local assembly body. The residual-add/store idea should only be revisited with a cleaner single-schedule implementation and a repeated 2/3/4-core win.
+    - Rejected fused `PAD->DEPTHWISE` interior fast helper:
+      - Added a `depthwise_valid_pixel_fast` helper and hoisted the interior/border branch out of the per-channel loop for fused padded depthwise pixels.
+      - Correctness stayed in the same raw tensor range.
+      - The targeted `bench-op` result for landmarker `049 PAD+DEPTHWISE` improved at 3 threads (`7.57 ms` -> `6.72 ms`) but regressed at 4 threads (`7.55 ms` -> `7.92 ms`).
+      - Repeated tracked A/B was not a win:
+        - 2 threads: retained `160.0/159.8 ms`; depthvalid `159.2/159.2 ms`.
+        - 3 threads: retained `130.2/131.2 ms`; depthvalid `128.6/135.5 ms`.
+        - 4 threads: retained `124.9/130.0 ms`; depthvalid `127.2/127.3 ms`.
+      - Reverted. Do not keep branch-hoist depthwise changes unless they improve the integrated tracked path, not only one noisy op sample.
+  - 2026-05-16 tracked camera refresh mode:
+    - Fresh subagent review concluded the recent kernel experiments were beginning to cycle around noisy op-level wins, and recommended moving the next work to the production camera tracker path.
+    - Existing `pipeline-rgb-track` already updated the next-frame ROI from the landmarker auxiliary landmarks on every repeated frame:
+      - `next_rect = rect_from_aux_landmarks_c(internal, &used_rect, image_w, image_h);`
+      - `if (presence >= 0.5f && rect_is_usable(&next_rect)) rect = next_rect;`
+    - Added an optional `refresh_interval` argument to `pipeline-rgb-track`:
+      - Usage: `pose_neon_runtime pipeline-rgb-track <data_dir> <rgb24.bin> <width> <height> <out.json> [threads] [reps] [refresh_interval]`.
+      - `refresh_interval=0` keeps the previous behavior: one detector acquisition followed by tracked landmarker frames.
+      - `refresh_interval=N` reruns the detector before tracked frame `N`, `2N`, etc.
+      - If landmarker presence drops below `0.5` or the next rect is invalid, the next frame reacquires with the detector.
+      - Output now reports `refresh_interval`, `detector_runs`, and total detector acquisition time in `acquire_ms`; amortized FPS includes detector reacquisition time.
+    - Local correctness smoke:
+      - `/tmp/pose_neon_runtime_trackrefresh_local pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-track-refresh-local.json 4 4 2`
+      - Produced `pose_count=1`, `refresh_interval=2`, `detector_runs=2`.
+    - Pi raw tensor correctness for the new binary stayed in the same range:
+      - detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+      - landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.85882429e-14`, tensor 283 `5.188e-4`, tensor 312 `1.3589859e-05`.
+    - Pi no-refresh A/B against the previous binary, `reps=16`, showed no material regression:
+      - 2 threads: previous tracked frame `158.8 ms`, `6.30 FPS`; new `160.8 ms`, `6.22 FPS`.
+      - 3 threads: previous `130.6 ms`, `7.66 FPS`; new `130.6 ms`, `7.66 FPS`.
+      - 4 threads: previous `128.1 ms`, `7.81 FPS`; new `127.8 ms`, `7.83 FPS`.
+      - The 4-thread output JSON matched exactly (`0.0` diff in exported x/y/z and presence).
+    - Pi refresh-interval benchmark on `out/human-for-pose.rgb`, `reps=64`, reporting amortized FPS including detector runs:
+      - 2 threads:
+        - refresh `0`: `6.19 FPS`, detector runs `1`, tracked frame `155.8 ms`.
+        - refresh `8`: `5.13 FPS`, detector runs `8`.
+        - refresh `16`: `5.66 FPS`, detector runs `4`.
+        - refresh `24`: `5.82 FPS`, detector runs `3`.
+        - refresh `32`: `5.99 FPS`, detector runs `2`.
+      - 3 threads:
+        - refresh `0`: `7.52 FPS`, detector runs `1`, tracked frame `128.1 ms`.
+        - refresh `8`: `6.27 FPS`, detector runs `8`.
+        - refresh `16`: `6.93 FPS`, detector runs `4`.
+        - refresh `24`: `7.15 FPS`, detector runs `3`.
+        - refresh `32`: `7.17 FPS`, detector runs `2`.
+      - 4 threads:
+        - refresh `0`: `7.65 FPS`, detector runs `1`, tracked frame `126.1 ms`.
+        - refresh `8`: `6.40 FPS`, detector runs `8`.
+        - refresh `16`: `7.07 FPS`, detector runs `4`.
+        - refresh `24`: `7.32 FPS`, detector runs `3`.
+        - refresh `32`: `7.51 FPS`, detector runs `2`.
+    - Interpretation:
+      - For a static in-frame subject, periodic detector refresh only lowers amortized FPS, as expected. The production policy should be: update ROI every frame from landmarks, reacquire on low presence/invalid rect, and use rare periodic refresh only as a robustness knob.
+      - The useful camera-facing performance target is now explicit: with detector every 32 tracked frames, the current runtime is about `7.5 FPS` on 4 cores and `7.2 FPS` on 3 cores on this Pi/sample; with one initial detector acquisition and no periodic refresh it is about `7.6 FPS` on 4 cores and `7.5 FPS` on 3 cores over 64 repeated frames.
 
 Persistent thread-pool prefix runner:
 

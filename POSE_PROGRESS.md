@@ -431,6 +431,33 @@ End-to-end graph executor status:
     - Interpretation:
       - This is a retained low-risk pointwise improvement because the local assembly already supported partial stores; the change simply lets standalone partial output-channel blocks use it.
       - The next likely targets are the remaining hot landmarker depthwise ops (`032`, `006`, `023`) or a similarly narrow partial-block path for fused pointwise-add only if a benchmark identifies a real non-multiple-of-8 fused residual target.
+  - 2026-05-16 current profile after partial-block assembly:
+    - Current checkout: `846c1a8 Use A53 pointwise asm for partial blocks`.
+    - Pi profile command:
+      - `tailscale ssh max@pi3 'cd ~/gemma4-robot && ... POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast ... detector ... && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast ... landmarker ... && ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track ... 4 16 0'`
+    - Detector profile:
+      - Totals: CONV2D `155.5 ms`, DEPTHWISE `92.4 ms`, RESIZE_BILINEAR `4.8 ms`; raw detector `261.8 ms`.
+      - Top ops: `204 CONV2D 18.1 ms`, `014 CONV2D 10.8 ms`, `029 DEPTHWISE 9.7 ms`, `053 DEPTHWISE 9.6 ms`, `018 DEPTHWISE 9.5 ms`, `003 CONV2D 8.3 ms`.
+    - Landmarker profile:
+      - Totals: CONV2D `82.0 ms`, DEPTHWISE `67.5 ms`, RESIZE_BILINEAR `11.1 ms`; raw landmarker `162.2 ms` for this single profiled rep.
+      - Top ops: `032 DEPTHWISE 8.0 ms`, `049 PAD+DEPTHWISE 7.3 ms`, `123 DEPTHWISE 6.7 ms`, `006 DEPTHWISE 6.3 ms`, `058 DEPTHWISE 6.3 ms`, `190 RESIZE_BILINEAR+ADD 5.9 ms`, `003 CONV2D 5.6 ms`, `012 CONV2D 5.1 ms`.
+      - The `RESIZE_BILINEAR` profile line was noisy; `bench-op` below shows the fused resize/add op is much smaller under repeated measurement.
+    - Tracked sanity in that profile run: acquisition `292.1 ms`, sample `9.17 ms`, landmarker `111.8 ms`, tracked frame `122.5 ms`, `8.16 FPS`; amortized over 16 frames `140.8 ms` / `7.10 FPS`.
+    - Repeated `bench-op` on current default binary, `reps=50`, `warmup=5`:
+      - `032 DEPTHWISE [1,64,64,96]`: 2 threads `9.03 ms`, 3 threads `6.65 ms`, 4 threads `5.64 ms`.
+      - `006 DEPTHWISE [1,128,128,24]`: 2 threads `6.30 ms`, 3 threads `4.16 ms`, 4 threads `3.93 ms`.
+      - `023 PAD+DEPTHWISE [1,64,64,32]`: 2 threads `5.37 ms`, 3 threads `4.02 ms`, 4 threads `3.32 ms`.
+      - `049 PAD+DEPTHWISE [1,32,32,96]`: 2 threads `9.59 ms`, 3 threads `7.52 ms`, 4 threads `6.54 ms`.
+      - `058 DEPTHWISE [1,32,32,144]`: 2 threads `7.04 ms`, 3 threads `5.46 ms`, 4 threads `4.36 ms`.
+      - `190 RESIZE_BILINEAR+ADD [1,64,64,32]`: 2 threads `1.61 ms`, 3 threads `1.19 ms`, 4 threads `1.54 ms`.
+      - `012 CONV2D [1,128,128,32]`: 2 threads `3.50 ms`, 3 threads `2.94 ms`, 4 threads `3.09 ms`.
+      - `234 CONV2D [1,64,64,39]`: 2 threads `2.25 ms`, 3 threads `1.84 ms`, 4 threads `1.37 ms`.
+    - Tried to start a small follow-up experiment routing A53 assembly for `p_count < 6` pointwise tiles, since the assembly supports `mr < 6`.
+      - Local non-assembly build still matched references, but the required Pi benchmark could not be run because `tailscale ssh max@pi3` began requiring a fresh Tailscale SSH check.
+      - The unverified source change was reverted. No runtime code from that experiment is retained.
+    - Next best measured target once Pi access is restored:
+      - Prefer a fresh, narrow depthwise experiment against `049 PAD+DEPTHWISE` or `032 DEPTHWISE`, but do not repeat the already rejected fused stride-2 branch-hoist/fixed-shape attempt unless the implementation is materially different and improves integrated tracked A/B.
+      - The `mr < 6` pointwise assembly route can also be tested, but expected end-to-end gain is small because it mainly affects pixel-tail tiles and single-pixel heads.
 
 Persistent thread-pool prefix runner:
 

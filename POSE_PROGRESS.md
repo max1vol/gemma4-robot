@@ -742,3 +742,44 @@ End-to-end NEON reference path:
     - The change intentionally does not alter full 8-channel packed kernels or scalar tails smaller than 4 channels.
     - Fresh-context review found no blocking correctness issue. It confirmed the standalone partial-block path writes only real output lanes, the fused-add partial-block path preserves activation-after-residual ordering, and noted that fused-add tail benefit should not be claimed until a real non-multiple-of-8 residual op is benchmarked.
     - Next high-leverage work remains a true A53 pointwise full-block microkernel or a fixed-shape depthwise path for the current named hot ops.
+
+- 2026-05-16 retained 5x5 stride-1 SAME depthwise specialization:
+  - Refreshed current Pi profile before editing:
+    - `tailscale ssh max@pi3 'cd ~/gemma4-robot && ... POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast ... detector ... && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast ... landmarker ... && ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track ... 4 12'`
+    - Detector totals: `CONV2D 210.241 ms`, `DEPTHWISE 128.619 ms`; top depthwise ops included `119 20.339 ms`, `131 20.196 ms`, and `053 12.577 ms`.
+    - Landmarker totals: `CONV2D 77.356 ms`, `DEPTHWISE 67.524 ms`; top 5x5 depthwise ops included `058 7.943 ms`, `123 5.746 ms`, and `113 5.638 ms`.
+    - Tracked 4-core baseline in that run: acquisition `317.388 ms`; sample `9.376 ms`; landmarker `137.065 ms`; tracked frame `148.132 ms`; `6.751 FPS`.
+  - Runtime changes in `scripts/pose_neon_runtime.c`:
+    - Added a fixed `5x5 stride1 SAME` depthwise path for `kh=kw=5`, `stride=1`, `dilation=1`, `depth_multiplier=1`, `input_h=output_h`, and `input_w=output_w`.
+    - Border pixels use a checked 5x5 helper so SAME padding semantics stay unchanged.
+    - Interior pixels use an AArch64 two-adjacent-pixel kernel that reuses the 6 overlapping input columns and 5 weight vectors for each output row.
+    - The generic depthwise path is unchanged for stride-2, VALID, explicit-PAD fused depthwise, and non-5x5 shapes.
+  - Local correctness command:
+    - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime_dw5pair -lm -pthread && rm -rf /tmp/pose-det-dw5pair-local /tmp/pose-lm-dw5pair-local && mkdir -p /tmp/pose-det-dw5pair-local /tmp/pose-lm-dw5pair-local && /tmp/pose_neon_runtime_dw5pair out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-dw5pair-local 4 1 out/pose_runtime_test_detector/ref && /tmp/pose_neon_runtime_dw5pair out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-dw5pair-local 4 1 out/pose_runtime_test_noseg/ref`
+    - Detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+    - Landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+  - Pi cross-build/copy command for the experiment:
+    - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o out/pose_neon_runtime_aarch64_dw5same -lm -pthread'`
+    - `tar -cf - out/pose_neon_runtime_aarch64_dw5same | tailscale ssh max@pi3 'cd ~/gemma4-robot && tar -xf - && chmod +x out/pose_neon_runtime_aarch64_dw5same'`
+  - Pi op-level benchmark, old default vs paired 5x5 path, 4 threads, `reps=30`, `warmup=3`:
+    - Detector op `119`: old `11.009134 ms`; new `7.196057 ms`.
+    - Detector op `131`: old `10.740191 ms`; new `7.848942 ms`.
+    - Detector op `053`: old `12.399431 ms`; new `9.531679 ms`.
+    - Landmarker op `058`: old `7.212672 ms`; new `4.531426 ms`.
+    - Landmarker op `123`: old `4.603914 ms`; new `3.080704 ms`.
+    - Landmarker op `113`: old `4.959906 ms`; new `5.301314 ms` in this run, so not every small 5x5 op improved.
+  - Pi tracked-frame and raw-model A/B, old default vs paired 5x5 path:
+    - 2-core tracked, `reps=16`: old `197.339 ms` / `5.067 FPS`; new `187.043 ms` / `5.346 FPS`.
+    - 3-core tracked, `reps=16`: old `154.535 ms` / `6.471 FPS`; new `143.655 ms` / `6.961 FPS`.
+    - 4-core tracked, `reps=16`: old `144.534 ms` / `6.919 FPS`; new `139.837 ms` / `7.151 FPS`.
+    - 4-core raw detector, `reps=3`: old `326.511 ms`; new `274.447 ms`.
+    - 4-core raw landmarker, `reps=3`: old `156.430 ms`; new `119.938 ms`.
+  - Final default binary refresh:
+    - Rebuilt `out/pose_neon_runtime_aarch64_ofast` with the retained 5x5 path and copied it to the Pi.
+    - Final Pi raw tensor check with the default binary stayed unchanged: detector tensor 441 max abs `5.264e-4`, tensor 429 `3.357e-4`; landmarker tensor 310 `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.36e-5`.
+    - Final 4-core raw sanity, `reps=3`: detector `293.906 ms`; landmarker `139.197 ms`.
+    - Final 4-core tracked sanity, `reps=24`: acquisition `287.788 ms`; sample `9.409 ms`; landmarker `127.858 ms`; tracked frame `138.821 ms`; `7.204 FPS`; amortized over 24 frames `150.812 ms` / `6.631 FPS`.
+  - Interpretation:
+    - This is a retained model-specific depthwise kernel improvement. It removes per-tap boundary checks and reuses overlapping adjacent-pixel data for common 5x5 stride-1 SAME depthwise ops.
+    - It improves all requested tracked NEON worker modes in the recorded A/B run and keeps raw tensor diffs unchanged.
+    - Fresh-context review still recommends a faithful local A53 `6x8` pointwise full-block microkernel, especially for fused residual pointwise tiles, as the next high-leverage target. This 5x5 depthwise change was taken because the live profile showed the targeted 5x5 ops were still prominent and the measured A/B moved end-to-end tracked frames.

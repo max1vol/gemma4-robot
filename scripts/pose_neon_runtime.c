@@ -2074,39 +2074,339 @@ static int can_fuse_pad_rgb_stride2_conv(const PoseRuntime* rt, int op_index) {
   return 1;
 }
 
+static int run_model_step(PoseRuntime* rt, int i, int end_exclusive, double* times_ms) {
+  int profile = times_ms != NULL;
+  if (i + 1 < end_exclusive && can_fuse_pad_rgb_stride2_conv(rt, i)) {
+    double t0 = profile ? now_s() : 0.0;
+    op_conv2d_3x3s2_rgb24_from_pad(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
+    if (profile) times_ms[i + 1] += (now_s() - t0) * 1000.0;
+    return i + 2;
+  }
+  if (i + 1 < end_exclusive && can_fuse_pointwise_conv_add(rt, i)) {
+    double t0 = profile ? now_s() : 0.0;
+    op_conv2d_1x1_add_packed(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
+    if (profile) times_ms[i] += (now_s() - t0) * 1000.0;
+    return i + 2;
+  }
+  if (i + 1 < end_exclusive && can_fuse_pad_depthwise(rt, i)) {
+    double t0 = profile ? now_s() : 0.0;
+    op_depthwise_from_pad(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
+    if (profile) times_ms[i + 1] += (now_s() - t0) * 1000.0;
+    return i + 2;
+  }
+  double t0 = profile ? now_s() : 0.0;
+  run_op(rt, &rt->def->ops[i]);
+  if (profile) times_ms[i] += (now_s() - t0) * 1000.0;
+  return i + 1;
+}
+
+static void run_model_until(PoseRuntime* rt, int end_exclusive) {
+  if (end_exclusive < 0) end_exclusive = 0;
+  if (end_exclusive > rt->def->op_count) end_exclusive = rt->def->op_count;
+  for (int i = 0; i < end_exclusive;) {
+    i = run_model_step(rt, i, end_exclusive, NULL);
+  }
+}
+
 static void run_model(PoseRuntime* rt, int profile) {
   double* times_ms = NULL;
   if (profile) times_ms = (double*)calloc((size_t)rt->def->op_count, sizeof(double));
-  for (int i = 0; i < rt->def->op_count; ++i) {
-    if (can_fuse_pad_rgb_stride2_conv(rt, i)) {
-      double t0 = profile ? now_s() : 0.0;
-      op_conv2d_3x3s2_rgb24_from_pad(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
-      if (profile) times_ms[i + 1] += (now_s() - t0) * 1000.0;
-      i++;
-      continue;
-    }
-    if (can_fuse_pointwise_conv_add(rt, i)) {
-      double t0 = profile ? now_s() : 0.0;
-      op_conv2d_1x1_add_packed(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
-      if (profile) times_ms[i] += (now_s() - t0) * 1000.0;
-      i++;
-      continue;
-    }
-    if (can_fuse_pad_depthwise(rt, i)) {
-      double t0 = profile ? now_s() : 0.0;
-      op_depthwise_from_pad(rt, &rt->def->ops[i], &rt->def->ops[i + 1]);
-      if (profile) times_ms[i + 1] += (now_s() - t0) * 1000.0;
-      i++;
-      continue;
-    }
-    double t0 = profile ? now_s() : 0.0;
-    run_op(rt, &rt->def->ops[i]);
-    if (profile) times_ms[i] += (now_s() - t0) * 1000.0;
+  for (int i = 0; i < rt->def->op_count;) {
+    i = run_model_step(rt, i, rt->def->op_count, times_ms);
   }
   if (profile) {
     print_profile(rt, times_ms);
     free(times_ms);
   }
+}
+
+typedef enum {
+  BENCH_SINGLE = 0,
+  BENCH_PAD_RGB_CONV = 1,
+  BENCH_POINTWISE_CONV_ADD = 2,
+  BENCH_PAD_DEPTHWISE = 3,
+} BenchKind;
+
+typedef struct {
+  BenchKind kind;
+  int requested_pos;
+  int start_pos;
+  int timed_pos;
+  int aux_pos;
+} BenchTarget;
+
+typedef struct {
+  int count;
+  int tensor_idx[16];
+  void* copy[16];
+  size_t bytes[16];
+} BenchSnapshots;
+
+static const PoseModelDef* select_model(const char* name);
+
+static int find_op_pos_by_source_index(const PoseModelDef* def, int source_op_index) {
+  for (int i = 0; i < def->op_count; ++i) {
+    if (def->ops[i].index == source_op_index) return i;
+  }
+  return -1;
+}
+
+static const char* bench_kind_name(BenchKind kind) {
+  switch (kind) {
+    case BENCH_PAD_RGB_CONV: return "PAD+CONV2D";
+    case BENCH_POINTWISE_CONV_ADD: return "CONV2D+ADD";
+    case BENCH_PAD_DEPTHWISE: return "PAD+DEPTHWISE";
+    case BENCH_SINGLE:
+    default: return "SINGLE";
+  }
+}
+
+static BenchTarget resolve_bench_target(PoseRuntime* rt, int source_op_index, int prefer_fused) {
+  BenchTarget target = {BENCH_SINGLE, -1, -1, -1, -1};
+  int pos = find_op_pos_by_source_index(rt->def, source_op_index);
+  if (pos < 0) {
+    fprintf(stderr, "source op %d not found in model %s\n", source_op_index, rt->def->name);
+    exit(2);
+  }
+  target.requested_pos = pos;
+  target.start_pos = pos;
+  target.timed_pos = pos;
+  if (prefer_fused) {
+    if (pos > 0 && can_fuse_pad_rgb_stride2_conv(rt, pos - 1)) {
+      target.kind = BENCH_PAD_RGB_CONV;
+      target.start_pos = pos - 1;
+      target.timed_pos = pos;
+      target.aux_pos = pos;
+      return target;
+    }
+    if (pos > 0 && can_fuse_pointwise_conv_add(rt, pos - 1)) {
+      target.kind = BENCH_POINTWISE_CONV_ADD;
+      target.start_pos = pos - 1;
+      target.timed_pos = pos - 1;
+      target.aux_pos = pos;
+      return target;
+    }
+    if (pos > 0 && can_fuse_pad_depthwise(rt, pos - 1)) {
+      target.kind = BENCH_PAD_DEPTHWISE;
+      target.start_pos = pos - 1;
+      target.timed_pos = pos;
+      target.aux_pos = pos;
+      return target;
+    }
+    if (can_fuse_pad_rgb_stride2_conv(rt, pos)) {
+      target.kind = BENCH_PAD_RGB_CONV;
+      target.start_pos = pos;
+      target.timed_pos = pos + 1;
+      target.aux_pos = pos + 1;
+      return target;
+    }
+    if (can_fuse_pointwise_conv_add(rt, pos)) {
+      target.kind = BENCH_POINTWISE_CONV_ADD;
+      target.start_pos = pos;
+      target.timed_pos = pos;
+      target.aux_pos = pos + 1;
+      return target;
+    }
+    if (can_fuse_pad_depthwise(rt, pos)) {
+      target.kind = BENCH_PAD_DEPTHWISE;
+      target.start_pos = pos;
+      target.timed_pos = pos + 1;
+      target.aux_pos = pos + 1;
+      return target;
+    }
+  }
+  return target;
+}
+
+static const PoseOpDef* bench_output_op(const PoseRuntime* rt, const BenchTarget* target) {
+  if (target->kind == BENCH_PAD_RGB_CONV ||
+      target->kind == BENCH_POINTWISE_CONV_ADD ||
+      target->kind == BENCH_PAD_DEPTHWISE) {
+    return &rt->def->ops[target->aux_pos];
+  }
+  return &rt->def->ops[target->timed_pos];
+}
+
+static uint64_t op_mac_count(const PoseRuntime* rt, const PoseOpDef* op) {
+  if (op->op == POSE_OP_CONV2D) {
+    const PoseTensorDef* wt = &rt->def->tensors[op->inputs[1]];
+    const PoseTensorDef* out = &rt->def->tensors[op->outputs[0]];
+    if (wt->rank != 4 || out->rank != 4) return 0;
+    return (uint64_t)out->dims[1] * (uint64_t)out->dims[2] * (uint64_t)out->dims[3] *
+        (uint64_t)wt->dims[1] * (uint64_t)wt->dims[2] * (uint64_t)wt->dims[3];
+  }
+  if (op->op == POSE_OP_DEPTHWISE) {
+    const PoseTensorDef* wt = &rt->def->tensors[op->inputs[1]];
+    const PoseTensorDef* out = &rt->def->tensors[op->outputs[0]];
+    if (wt->rank != 4 || out->rank != 4) return 0;
+    return (uint64_t)out->dims[1] * (uint64_t)out->dims[2] * (uint64_t)out->dims[3] *
+        (uint64_t)wt->dims[1] * (uint64_t)wt->dims[2];
+  }
+  return 0;
+}
+
+static uint64_t bench_target_mac_count(const PoseRuntime* rt, const BenchTarget* target) {
+  switch (target->kind) {
+    case BENCH_PAD_RGB_CONV:
+    case BENCH_PAD_DEPTHWISE:
+      return op_mac_count(rt, &rt->def->ops[target->aux_pos]);
+    case BENCH_POINTWISE_CONV_ADD:
+      return op_mac_count(rt, &rt->def->ops[target->timed_pos]);
+    case BENCH_SINGLE:
+    default:
+      return op_mac_count(rt, &rt->def->ops[target->timed_pos]);
+  }
+}
+
+static void run_bench_target_once(PoseRuntime* rt, const BenchTarget* target) {
+  switch (target->kind) {
+    case BENCH_PAD_RGB_CONV:
+      op_conv2d_3x3s2_rgb24_from_pad(
+          rt, &rt->def->ops[target->start_pos], &rt->def->ops[target->aux_pos]);
+      break;
+    case BENCH_POINTWISE_CONV_ADD:
+      op_conv2d_1x1_add_packed(
+          rt, &rt->def->ops[target->timed_pos], &rt->def->ops[target->aux_pos]);
+      break;
+    case BENCH_PAD_DEPTHWISE:
+      op_depthwise_from_pad(
+          rt, &rt->def->ops[target->start_pos], &rt->def->ops[target->aux_pos]);
+      break;
+    case BENCH_SINGLE:
+    default:
+      run_op(rt, &rt->def->ops[target->timed_pos]);
+      break;
+  }
+}
+
+static void bench_snapshot_add_tensor(PoseRuntime* rt, BenchSnapshots* snaps, int tensor_idx) {
+  if (tensor_idx < 0) return;
+  const PoseTensorDef* t = &rt->def->tensors[tensor_idx];
+  if (t->is_const) return;
+  size_t bytes = tensor_bytes(t);
+  if (!bytes) return;
+  for (int i = 0; i < snaps->count; ++i) {
+    if (snaps->tensor_idx[i] == tensor_idx) return;
+  }
+  if (snaps->count >= 16) {
+    fprintf(stderr, "too many benchmark input tensors to snapshot\n");
+    exit(2);
+  }
+  int slot = snaps->count++;
+  snaps->tensor_idx[slot] = tensor_idx;
+  snaps->bytes[slot] = bytes;
+  snaps->copy[slot] = xaligned_alloc(64, bytes);
+  memcpy(snaps->copy[slot], rt->tensor[tensor_idx], bytes);
+}
+
+static void bench_snapshot_op_inputs(PoseRuntime* rt, BenchSnapshots* snaps, const PoseOpDef* op, int skip_tensor) {
+  for (int i = 0; i < op->input_count; ++i) {
+    if (op->inputs[i] == skip_tensor) continue;
+    bench_snapshot_add_tensor(rt, snaps, op->inputs[i]);
+  }
+}
+
+static BenchSnapshots bench_snapshot_inputs(PoseRuntime* rt, const BenchTarget* target) {
+  BenchSnapshots snaps;
+  memset(&snaps, 0, sizeof(snaps));
+  switch (target->kind) {
+    case BENCH_PAD_RGB_CONV:
+    case BENCH_PAD_DEPTHWISE:
+      bench_snapshot_op_inputs(rt, &snaps, &rt->def->ops[target->start_pos], -1);
+      bench_snapshot_op_inputs(
+          rt, &snaps, &rt->def->ops[target->aux_pos],
+          rt->def->ops[target->start_pos].outputs[0]);
+      break;
+    case BENCH_POINTWISE_CONV_ADD:
+      bench_snapshot_op_inputs(rt, &snaps, &rt->def->ops[target->timed_pos], -1);
+      bench_snapshot_op_inputs(
+          rt, &snaps, &rt->def->ops[target->aux_pos],
+          rt->def->ops[target->timed_pos].outputs[0]);
+      break;
+    case BENCH_SINGLE:
+    default:
+      bench_snapshot_op_inputs(rt, &snaps, &rt->def->ops[target->timed_pos], -1);
+      break;
+  }
+  return snaps;
+}
+
+static void bench_restore_inputs(PoseRuntime* rt, const BenchSnapshots* snaps) {
+  for (int i = 0; i < snaps->count; ++i) {
+    memcpy(rt->tensor[snaps->tensor_idx[i]], snaps->copy[i], snaps->bytes[i]);
+  }
+}
+
+static void bench_free_snapshots(BenchSnapshots* snaps) {
+  for (int i = 0; i < snaps->count; ++i) free(snaps->copy[i]);
+  memset(snaps, 0, sizeof(*snaps));
+}
+
+static void print_tensor_shape(const PoseTensorDef* t) {
+  printf("[");
+  for (int d = 0; d < t->rank; ++d) {
+    printf("%s%d", d ? "," : "", t->dims[d]);
+  }
+  printf("]");
+}
+
+static int run_bench_op(
+    const char* data_dir, const char* model_name, const char* input_path,
+    int source_op_index, int threads, int reps, int warmup) {
+  if (threads < 1) threads = 1;
+  if (reps < 1) reps = 1;
+  if (warmup < 0) warmup = 0;
+  const PoseModelDef* model = select_model(model_name);
+  PoseRuntime rt;
+  runtime_init(&rt, model, data_dir, threads);
+  runtime_start_pool(&rt);
+  int input_idx = model->inputs[0];
+  read_file_exact(input_path, rt.tensor[input_idx], tensor_bytes(&model->tensors[input_idx]));
+
+  int prefer_fused = 1;
+  const char* fused_env = getenv("POSE_BENCH_FUSED");
+  if (fused_env && strcmp(fused_env, "0") == 0) prefer_fused = 0;
+  BenchTarget target = resolve_bench_target(&rt, source_op_index, prefer_fused);
+  run_model_until(&rt, target.start_pos);
+
+  BenchSnapshots snaps = bench_snapshot_inputs(&rt, &target);
+  for (int i = 0; i < warmup; ++i) {
+    bench_restore_inputs(&rt, &snaps);
+    run_bench_target_once(&rt, &target);
+  }
+  double total_ms = 0.0;
+  for (int i = 0; i < reps; ++i) {
+    bench_restore_inputs(&rt, &snaps);
+    double t0 = now_s();
+    run_bench_target_once(&rt, &target);
+    total_ms += (now_s() - t0) * 1000.0;
+  }
+  double avg_ms = total_ms / (double)reps;
+  uint64_t macs = bench_target_mac_count(&rt, &target);
+  const PoseOpDef* req_op = &rt.def->ops[target.requested_pos];
+  const PoseOpDef* timed_op = &rt.def->ops[target.timed_pos];
+  const PoseOpDef* out_op = bench_output_op(&rt, &target);
+  const PoseTensorDef* out = &rt.def->tensors[out_op->outputs[0]];
+  printf("bench_op model=%s request_src_op=%03d request_op=%s kind=%s timed_src_op=%03d timed_op=%s",
+      model->name, req_op->index, op_name(req_op->op), bench_kind_name(target.kind),
+      timed_op->index, op_name(timed_op->op));
+  if (target.aux_pos >= 0) {
+    const PoseOpDef* aux_op = &rt.def->ops[target.aux_pos];
+    printf(" aux_src_op=%03d aux_op=%s", aux_op->index, op_name(aux_op->op));
+  }
+  printf(" threads=%d reps=%d warmup=%d avg_ms=%.6f", rt.threads, reps, warmup, avg_ms);
+  if (macs) {
+    printf(" macs=%llu gmac_s=%.6f gflop_s_fma2=%.6f",
+        (unsigned long long)macs, (double)macs / (avg_ms * 1.0e6),
+        2.0 * (double)macs / (avg_ms * 1.0e6));
+  }
+  printf(" out=");
+  print_tensor_shape(out);
+  printf("\n");
+
+  bench_free_snapshots(&snaps);
+  runtime_destroy(&rt);
+  return 0;
 }
 
 static const PoseModelDef* select_model(const char* name) {
@@ -2743,6 +3043,18 @@ static int run_pipeline_rgb_track(
 }
 
 int main(int argc, char** argv) {
+  if (argc >= 2 && strcmp(argv[1], "bench-op") == 0) {
+    if (argc < 6) {
+      fprintf(stderr,
+              "usage: %s bench-op <data_dir> <detector|landmarker> <input_f32.bin> <src_op> [threads] [reps] [warmup]\n",
+              argv[0]);
+      return 2;
+    }
+    int threads = argc > 6 ? atoi(argv[6]) : 1;
+    int reps = argc > 7 ? atoi(argv[7]) : 50;
+    int warmup = argc > 8 ? atoi(argv[8]) : 3;
+    return run_bench_op(argv[2], argv[3], argv[4], atoi(argv[5]), threads, reps, warmup);
+  }
   if (argc >= 2 && strcmp(argv[1], "pipeline-rgb") == 0) {
     if (argc < 7) {
       fprintf(stderr,
@@ -2788,7 +3100,9 @@ int main(int argc, char** argv) {
   if (argc < 5) {
     fprintf(stderr,
             "usage: %s <data_dir> <detector|landmarker> <input_f32.bin> <out_dir> [threads] [reps] [ref_dir]\n"
+            "       %s bench-op <data_dir> <detector|landmarker> <input_f32.bin> <src_op> [threads] [reps] [warmup]\n"
             "       %s pipeline-rgb <data_dir> <rgb24.bin> <width> <height> <out.json> [threads] [reps]\n",
+            argv[0],
             argv[0],
             argv[0]);
     fprintf(stderr,

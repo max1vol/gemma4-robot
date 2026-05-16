@@ -542,3 +542,75 @@ End-to-end NEON reference path:
   - Current conclusion:
     - The retained pointwise design is still the best measured C/intrinsics implementation so far: `6x8`, pixel-tile-major scheduling, packed output-channel blocks of 8, and graph-level residual fusion.
     - Next pointwise work should be either a true A53 assembly microkernel based on the XNNPACK 6x8/4x8 kernels, or a dedicated microbenchmark harness that compares variants outside the full model before touching the integrated runtime again.
+
+- 2026-05-16 single-op benchmark instrumentation:
+  - Added a production-path `bench-op` mode to `scripts/pose_neon_runtime.c`:
+    - Usage: `pose_neon_runtime bench-op <data_dir> <detector|landmarker> <input_f32.bin> <src_op> [threads] [reps] [warmup]`.
+    - It runs the real graph up to the requested source op, preserving the same fusions used by `run_model()` (`PAD -> RGB stride2 CONV`, `1x1 CONV2D -> ADD`, and `PAD -> DEPTHWISE`).
+    - It snapshots non-constant benchmark inputs after the prefix and restores them before each warmup/timed rep, so repeated timings do not depend on stale mutated intermediates.
+    - It prints the selected fused/standalone kind, output shape, MAC count, GMAC/s, and FP32 FMA-equivalent GFLOP/s.
+    - Set `POSE_BENCH_FUSED=0` to force standalone `run_op()` dispatch for comparison.
+  - Local build and correctness commands:
+    - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime -lm -pthread`
+    - `rm -rf /tmp/pose-det-bench-check /tmp/pose-lm-bench-check && mkdir -p /tmp/pose-det-bench-check /tmp/pose-lm-bench-check && /tmp/pose_neon_runtime out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-bench-check 4 1 out/pose_runtime_test_detector/ref && /tmp/pose_neon_runtime out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-bench-check 4 1 out/pose_runtime_test_noseg/ref`
+    - Local tensor diffs remained unchanged: detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`; landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+    - Local smoke examples:
+      - `/tmp/pose_neon_runtime bench-op out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin 204 4 10 1`
+      - `/tmp/pose_neon_runtime bench-op out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin 012 4 10 1`
+  - Pi cross-build/copy command:
+    - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o out/pose_neon_runtime_aarch64_ofast -lm -pthread'`
+    - `tar -cf - out/pose_neon_runtime_aarch64_ofast | tailscale ssh max@pi3 'cd ~/gemma4-robot && tar -xf - && chmod +x out/pose_neon_runtime_aarch64_ofast ...'`
+  - Pi correctness check after the refactor:
+    - Command inside the copy run: `./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-benchop 4 1 out/pose_runtime_test_detector/ref && ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-benchop 4 1 out/pose_runtime_test_noseg/ref`
+    - Detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+    - Landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.36e-5`.
+  - Pi op-level benchmark command pattern, `reps=20`, `warmup=2`:
+    - Detector ops: `204` pointwise CONV2D, `053` depthwise, `003` fused initial `PAD+CONV2D`, `151` fused `PAD+DEPTHWISE`.
+    - Landmarker ops: `012` pointwise CONV2D, `058` depthwise, `003` fused initial `PAD+CONV2D`, `023` fused `PAD+DEPTHWISE`.
+  - Pi op-level timings:
+    - Detector `204` pointwise CONV2D, out `[1,14,14,192]`, `43,352,064` MACs:
+      - 2 threads: `37.440 ms`, `1.158 GMAC/s`, `2.316 GFLOP/s`.
+      - 3 threads: `18.697 ms`, `2.319 GMAC/s`, `4.637 GFLOP/s`.
+      - 4 threads: `20.896 ms`, `2.075 GMAC/s`, `4.149 GFLOP/s`.
+    - Detector `053` depthwise, out `[1,28,28,240]`, `4,704,000` MACs:
+      - 2 threads: `18.237 ms`, `0.258 GMAC/s`, `0.516 GFLOP/s`.
+      - 3 threads: `13.709 ms`, `0.343 GMAC/s`, `0.686 GFLOP/s`.
+      - 4 threads: `14.146 ms`, `0.333 GMAC/s`, `0.665 GFLOP/s`.
+    - Detector `003` fused initial `PAD+CONV2D`, out `[1,112,112,24]`, `8,128,512` MACs:
+      - 2 threads: `8.497 ms`, `0.957 GMAC/s`, `1.913 GFLOP/s`.
+      - 3 threads: `6.655 ms`, `1.221 GMAC/s`, `2.443 GFLOP/s`.
+      - 4 threads: `4.248 ms`, `1.913 GMAC/s`, `3.827 GFLOP/s`.
+    - Detector `151` fused `PAD+DEPTHWISE`, out `[1,7,7,672]`, `823,200` MACs:
+      - 2 threads: `4.911 ms`, `0.168 GMAC/s`, `0.335 GFLOP/s`.
+      - 3 threads: `4.684 ms`, `0.176 GMAC/s`, `0.351 GFLOP/s`.
+      - 4 threads: `2.618 ms`, `0.314 GMAC/s`, `0.629 GFLOP/s`.
+    - Landmarker `012` pointwise CONV2D, out `[1,128,128,32]`, `4,194,304` MACs:
+      - 2 threads: `3.606 ms`, `1.163 GMAC/s`, `2.326 GFLOP/s`.
+      - 3 threads: `2.955 ms`, `1.419 GMAC/s`, `2.839 GFLOP/s`.
+      - 4 threads: `3.552 ms`, `1.181 GMAC/s`, `2.362 GFLOP/s`.
+    - Landmarker `058` depthwise, out `[1,32,32,144]`, `3,686,400` MACs:
+      - 2 threads: `12.539 ms`, `0.294 GMAC/s`, `0.588 GFLOP/s`.
+      - 3 threads: `9.627 ms`, `0.383 GMAC/s`, `0.766 GFLOP/s`.
+      - 4 threads: `6.850 ms`, `0.538 GMAC/s`, `1.076 GFLOP/s`.
+    - Landmarker `003` fused initial `PAD+CONV2D`, out `[1,128,128,24]`, `10,616,832` MACs:
+      - 2 threads: `10.868 ms`, `0.977 GMAC/s`, `1.954 GFLOP/s`.
+      - 3 threads: `7.065 ms`, `1.503 GMAC/s`, `3.005 GFLOP/s`.
+      - 4 threads: `8.592 ms`, `1.236 GMAC/s`, `2.471 GFLOP/s`.
+    - Landmarker `023` fused `PAD+DEPTHWISE`, out `[1,64,64,32]`, `1,179,648` MACs:
+      - 2 threads: `5.476 ms`, `0.215 GMAC/s`, `0.431 GFLOP/s`.
+      - 3 threads: `5.097 ms`, `0.231 GMAC/s`, `0.463 GFLOP/s`.
+      - 4 threads: `3.278 ms`, `0.360 GMAC/s`, `0.720 GFLOP/s`.
+  - Pi tracked-frame sanity after the refactor, `reps=5`:
+    - Command: `tailscale ssh max@pi3 'cd ~/gemma4-robot && for t in 2 3 4; do ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-for-pose-benchop-track-t$t.json $t 5; done'`
+    - 2 cores: acquisition `443.214 ms`; sample `9.229 ms`; landmarker `192.192 ms`; tracked frame `203.157 ms`; `4.922 FPS`.
+    - 3 cores: acquisition `363.503 ms`; sample `9.221 ms`; landmarker `150.839 ms`; tracked frame `161.902 ms`; `6.177 FPS`.
+    - 4 cores: acquisition `346.428 ms`; sample `9.364 ms`; landmarker `135.055 ms`; tracked frame `146.214 ms`; `6.839 FPS`.
+  - Failed idea from the new harness:
+    - Tried capping packed pointwise work to 3 compute threads in 4-thread mode, while leaving depthwise and other ops on the requested worker count.
+    - Pi A/B command used detector op `204` and tracked 4-core frames, with `POSE_POINTWISE_MAX_THREADS=4` forcing the original behavior for comparison.
+    - The cap regressed detector op `204` from `22.169 ms` to `33.301 ms` and tracked 4-core frames from `152.059 ms` to `160.336 ms` in the same run.
+    - Reverted. The earlier 3-thread-vs-4-thread differences are too load-sensitive to justify an integrated scheduler heuristic.
+  - Interpretation:
+    - This commit is instrumentation, not a new kernel-speed claim. It preserves the current end-to-end runtime and gives a lower-noise way to test A53 pointwise/depthwise microkernel changes.
+    - The op-level results show why blind full-model pointwise changes were hard to judge: several 4-thread samples are slower than 3-thread samples under current Pi load, while fused stride/depthwise ops scale differently from large pointwise ops.
+    - Next implementation work should use `bench-op` to compare a true A53 assembly or carefully constrained intrinsics pointwise microkernel against source op `204` and a few smaller landmarker pointwise ops before touching the integrated path.

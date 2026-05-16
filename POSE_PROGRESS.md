@@ -648,3 +648,27 @@ End-to-end NEON reference path:
   - Interpretation:
     - Do not keep exploring C-level depthwise adjacent-column variants unless a very specific hot op is isolated first; the 4-column variant did not translate into end-to-end gain.
     - The true next implementation target is now clearer: reimplement the XNNPACK-style A53 6x8 pointwise schedule inside our custom runtime, then apply it to both standalone and fused `1x1 CONV2D -> ADD` tiles. Detector `204` proves the schedule can be faster; tracked-frame gains require the fused-add variant too.
+
+- 2026-05-16 local A53 `6x8` inline-asm pointwise attempt:
+  - Implemented a compile-flagged local AArch64 inline-asm microkernel for full `p_count=6`, `oc_count=8` standalone packed pointwise tiles, then used the existing C/intrinsics path as the oracle.
+  - Local correctness command:
+    - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime -lm -pthread && rm -rf /tmp/pose-det-a53local /tmp/pose-lm-a53local && mkdir -p /tmp/pose-det-a53local /tmp/pose-lm-a53local && /tmp/pose_neon_runtime out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-a53local 4 1 out/pose_runtime_test_detector/ref && /tmp/pose_neon_runtime out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-a53local 4 1 out/pose_runtime_test_noseg/ref`
+  - Pi cross-build command for the experimental binary:
+    - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -DPOSE_USE_A53_PW6X8_LOCAL -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o out/pose_neon_runtime_aarch64_a53local -lm -pthread'`
+  - First local asm schedule:
+    - Detector `204`: 3 threads `19.207 ms`, 4 threads `22.563 ms`.
+    - Landmarker `012`: 3 threads `3.056 ms`, 4 threads `3.003 ms`.
+    - Tracked 4-core frame: `152.432 ms`, `6.560 FPS`.
+  - K-by-2 unrolled local asm schedule:
+    - Detector `204`: 3 threads `30.951 ms`, 4 threads `22.235 ms`.
+    - Landmarker `012`: 3 threads `3.550 ms`, 4 threads `4.371 ms`.
+    - Tracked 4-core frame: `146.533 ms`, `6.824 FPS`.
+  - Rejected and removed before commit:
+    - The local asm did not reproduce the XNNPACK A53 schedule. It was correct, but it was slower than the retained C/intrinsics path on the important standalone op and did not produce a reliable tracked-frame gain.
+    - No runtime code from this experiment is retained. The next pointwise attempt should either mirror XNNPACK's instruction scheduling much more faithfully in a separate `.S`/microkernel-style file, or first target the fused `1x1 CONV2D -> ADD` path where tracked-frame time is actually exposed.
+  - Additional small-code experiments that were rejected in the same pass:
+    - Tried replacing `floorf` with integer truncation in model `RESIZE_BILINEAR` after clamping, and also tried a negative-safe integer floor helper in the camera/ROI samplers. Local raw tensor diffs stayed unchanged.
+    - Pi A/B for `RESIZE_BILINEAR` source ops `186`, `188`, `190` was not stable enough to keep. One run improved `188` from `0.813 ms` to `0.238 ms`, but a repeated run had the retained binary at `0.109/0.238/0.771 ms` and the truncation binary slightly slower at `0.116/0.247/0.775 ms`.
+    - The ROI sampler helper also moved tracked sample time the wrong way in repeated `pipeline-rgb-track` runs, so all sampler changes were reverted.
+    - Tried adding `restrict` qualifiers to the packed pointwise tile input/residual/output pointers. Correctness stayed unchanged, but tracked 4-core performance regressed in the measured run from `149.389 ms` / `6.694 FPS` to `152.696 ms` / `6.549 FPS`. Reverted.
+    - Lesson: do not keep micro-edits that only improve isolated noisy op samples. For this runtime, retain changes only when they improve the tracked landmarker frame or a consistently hot fused op with repeated A/B evidence.

@@ -393,6 +393,15 @@ End-to-end graph executor status:
     - Interpretation:
       - This is a retained narrow kernel improvement because it improves the targeted first-conv op and improves repeated tracked frames in all requested NEON worker modes while preserving output equivalence.
       - The next measured opportunity is likely the ROI sampler (`sample_rotated_rect_rgb` is still about `9 ms` per tracked frame) or another fixed-shape depthwise/pointwise head selected from a fresh profile.
+  - 2026-05-16 rejected sampler row-span experiment:
+    - Tried a branch-hoisted `sample_rotated_rect_rgb` path that found the valid source-image span for each output row, zeroed out-of-image spans, and processed the inside span without a per-pixel bounds branch.
+    - A first variant also replaced `floorf` with `(int)` casts inside the positive valid span; a second conservative variant kept `floorf` and the original full-output `memset`.
+    - Local output comparison on `out/human-for-pose.rgb` matched exactly for short tracked runs, but the `-Ofast` Pi build still differed by about `1.2e-6` on the first tracked frame.
+    - Because the tracker feeds landmarks back into the next ROI, that tiny first-frame difference grew to about `0.0487` max numeric difference by 8 repeated frames and `0.0836` by 48 repeated frames.
+    - Pi timing was not a decisive win:
+      - 4 threads, `reps=48`, default vs sampler-span variant: sample `9.62 ms` -> `9.06 ms`, tracked frame `124.77 ms` -> `123.37 ms`, but final output diverged.
+      - Earlier 2/3/4-thread samples were mixed, with 3-thread tracked frame slightly worse in one run.
+    - Reverted. Do not keep sampler changes that are not bit/output-stable under the Pi `-Ofast` tracker loop, because ROI feedback amplifies tiny crop differences.
 
 Persistent thread-pool prefix runner:
 

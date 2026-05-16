@@ -402,6 +402,35 @@ End-to-end graph executor status:
       - 4 threads, `reps=48`, default vs sampler-span variant: sample `9.62 ms` -> `9.06 ms`, tracked frame `124.77 ms` -> `123.37 ms`, but final output diverged.
       - Earlier 2/3/4-thread samples were mixed, with 3-thread tracked frame slightly worse in one run.
     - Reverted. Do not keep sampler changes that are not bit/output-stable under the Pi `-Ofast` tracker loop, because ROI feedback amplifies tiny crop differences.
+  - 2026-05-16 retained partial-block A53 pointwise assembly:
+    - Refreshed Pi profile after the RGB-pair kernel:
+      - Detector totals: CONV2D `143.2 ms`, DEPTHWISE `87.5 ms`; raw detector `244.2 ms`.
+      - Landmarker totals: CONV2D `73.4 ms`, DEPTHWISE `65.5 ms`; top ops included `032 DEPTHWISE 10.6 ms`, first conv `003 CONV2D 9.1 ms`, `006 DEPTHWISE 9.0 ms`, `023 DEPTHWISE 7.2 ms`, and `012 CONV2D 6.3 ms`.
+      - Tracked 4-core profile run: acquisition `304.0 ms`, sample `9.5 ms`, landmarker `114.8 ms`, tracked frame `125.8 ms`, `7.95 FPS`.
+    - Rejected small-K pointwise specialization:
+      - Tried an inlined `K=8, N=32` path for landmarker `src_op=012` to reduce tiny 6x8 assembly-call/task overhead.
+      - Isolated `bench-op landmarker 012`, 4 threads, improved `3.688 ms` -> `2.901 ms`, and exported tracked JSON stayed identical.
+      - Integrated A/B did not hold: 2-core tracked `153.9 ms` -> `155.3 ms`, 3-core `126.3 ms` -> `126.3 ms`, 4-core `123.6 ms` -> `124.1 ms`.
+      - Reverted. Do not retain small-K pointwise specializations unless they improve the repeated tracked path, not only one isolated op.
+    - Retained partial assembly change:
+      - `conv2d_1x1_packed_tile()` now routes standalone packed pointwise tiles with `p_count == 6` and `oc_count >= 4` through the existing local A53 `6x8` assembly kernel, passing the real `oc_count` as `nc`.
+      - This relies on the existing assembly tail-store path and the existing zero-padded packed weights. It does not touch fused residual-add pointwise tiles.
+      - Main target is landmarker heatmap head `src_op=234`, output `[1,64,64,39]`, whose final 7-channel block previously used the C/NEON partial path.
+    - Pi isolated op benchmark, 4 threads, `reps=40`, `warmup=4`, previous default vs partial-block assembly:
+      - Landmarker `src_op=234`: `3.378571 ms` -> `1.379845 ms`.
+      - Single-pixel heads were unchanged/noisy as expected because `p_count != 6`: `src_op=298` `0.365 ms` -> `0.369 ms`, `src_op=294` `0.632 ms` -> `0.709 ms`.
+    - Pi tracked-frame A/B on `out/human-for-pose.rgb`, no detector refresh:
+      - 2 threads, `reps=48`: `153.4 ms`, `6.52 FPS` -> `152.2 ms`, `6.57 FPS`.
+      - 3 threads, `reps=48`: `129.9 ms`, `7.70 FPS` -> `125.9 ms`, `7.95 FPS`.
+      - 4 threads, `reps=48`: `124.6 ms`, `8.03 FPS` -> `121.0 ms`, `8.26 FPS`.
+      - Exported JSON numeric values matched exactly for the 2/3/4-thread long comparisons (`0.0` max absolute difference).
+    - Final default binary refresh:
+      - Rebuilt with `scripts/build_pose_runtime_aarch64.sh out/pose_neon_runtime_aarch64_ofast` and copied it to the Pi.
+      - Final raw 4-core check, `reps=3`: detector `242.9 ms`; landmarker `105.3 ms`; raw tensor diffs unchanged.
+      - Final tracked 4-core sanity, `reps=32`: acquisition `252.7 ms`; sample `9.54 ms`; landmarker `111.7 ms`; tracked frame `122.7 ms`; `8.15 FPS`; amortized over 32 frames `130.6 ms` / `7.66 FPS`.
+    - Interpretation:
+      - This is a retained low-risk pointwise improvement because the local assembly already supported partial stores; the change simply lets standalone partial output-channel blocks use it.
+      - The next likely targets are the remaining hot landmarker depthwise ops (`032`, `006`, `023`) or a similarly narrow partial-block path for fused pointwise-add only if a benchmark identifies a real non-multiple-of-8 fused residual target.
 
 Persistent thread-pool prefix runner:
 

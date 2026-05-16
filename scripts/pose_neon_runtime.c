@@ -1028,11 +1028,11 @@ static void conv2d_1x1_packed_tile(
   const float* bias = block;
   const float* weights = block + 8;
 #if defined(__aarch64__)
-  if (oc_count == 8 && p_count == 6) {
+  if (oc_count >= 4 && p_count == 6) {
 #if defined(POSE_USE_A53_PW6X8_ASM)
     PoseF32MinMaxParams params = pose_minmax_params_for_activation(activation);
     pose_f32_gemm_minmax_ukernel_6x8__asm_a53(
-        6, 8, (size_t)in_c * sizeof(float),
+        6, (size_t)oc_count, (size_t)in_c * sizeof(float),
         input + p0 * in_c, (size_t)in_c * sizeof(float),
         block,
         output + p0 * out_c + oc0,

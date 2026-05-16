@@ -108,12 +108,27 @@ typedef struct {
   int id;
 } PoolWorker;
 
+typedef enum {
+  POSE_PACK_NONE = 0,
+  POSE_PACK_ICOC = 1,
+  POSE_PACK_POINTWISE_X8 = 2,
+} PosePackedType;
+
+typedef struct {
+  int in_c;
+  int out_c;
+  int oc_blocks;
+  int block_stride;
+  float data[];
+} PackedPointwiseX8;
+
 struct PoseRuntime {
   const PoseModelDef* def;
   uint8_t* constants;
   size_t constants_bytes;
   void** tensor;
   void** packed;
+  uint8_t* packed_type;
   uint8_t* owned;
   int threads;
   int pool_workers;
@@ -330,6 +345,37 @@ static float* pack_conv_weights_icoc(const PoseTensorDef* wt, const float* weigh
           packed[(((size_t)ky * kw + kx) * in_c + ci) * out_c + oc] =
               weights[(((size_t)oc * kh + ky) * kw + kx) * in_c + ci];
         }
+      }
+    }
+  }
+  return packed;
+}
+
+static PackedPointwiseX8* pack_pointwise_x8(
+    const PoseTensorDef* wt, const float* weights, const float* bias) {
+  int out_c = wt->dims[0];
+  int in_c = wt->dims[3];
+  int oc_blocks = (out_c + 7) / 8;
+  int block_stride = 8 + in_c * 8;
+  size_t bytes = sizeof(PackedPointwiseX8) + (size_t)oc_blocks * block_stride * sizeof(float);
+  PackedPointwiseX8* packed = (PackedPointwiseX8*)xaligned_alloc(64, bytes);
+  packed->in_c = in_c;
+  packed->out_c = out_c;
+  packed->oc_blocks = oc_blocks;
+  packed->block_stride = block_stride;
+  for (int ob = 0; ob < oc_blocks; ++ob) {
+    int oc0 = ob * 8;
+    float* block = packed->data + (size_t)ob * block_stride;
+    for (int lane = 0; lane < 8; ++lane) {
+      int oc = oc0 + lane;
+      block[lane] = oc < out_c ? bias[oc] : 0.0f;
+    }
+    float* wblock = block + 8;
+    for (int ci = 0; ci < in_c; ++ci) {
+      for (int lane = 0; lane < 8; ++lane) {
+        int oc = oc0 + lane;
+        wblock[(size_t)ci * 8 + lane] =
+            oc < out_c ? weights[(size_t)oc * in_c + ci] : 0.0f;
       }
     }
   }
@@ -586,8 +632,14 @@ static void conv2d_3x3s2_rgb24_packed(
 }
 
 static void conv2d_1x1_packed_tile(
-    const float* input, const float* weights, const float* bias, float* output,
-    size_t p0, int p_count, int in_c, int out_c, int oc0, int oc_count, int activation) {
+    const float* input, const PackedPointwiseX8* packed, float* output,
+    size_t p0, int p_count, int oc_block, int oc_count, int activation) {
+  int in_c = packed->in_c;
+  int out_c = packed->out_c;
+  int oc0 = oc_block * 8;
+  const float* block = packed->data + (size_t)oc_block * packed->block_stride;
+  const float* bias = block;
+  const float* weights = block + 8;
 #if defined(__aarch64__)
   if (oc_count == 8 && p_count == 4) {
     const float* s0 = input + (p0 + 0) * in_c;
@@ -598,12 +650,12 @@ static void conv2d_1x1_packed_tile(
     float* d1 = output + (p0 + 1) * out_c + oc0;
     float* d2 = output + (p0 + 2) * out_c + oc0;
     float* d3 = output + (p0 + 3) * out_c + oc0;
-    float32x4_t a00 = vld1q_f32(bias + oc0 + 0), a01 = vld1q_f32(bias + oc0 + 4);
+    float32x4_t a00 = vld1q_f32(bias + 0), a01 = vld1q_f32(bias + 4);
     float32x4_t a10 = a00, a11 = a01;
     float32x4_t a20 = a00, a21 = a01;
     float32x4_t a30 = a00, a31 = a01;
     for (int ci = 0; ci < in_c; ++ci) {
-      const float* wv = weights + (size_t)ci * out_c + oc0;
+      const float* wv = weights + (size_t)ci * 8;
       float32x4_t w0v = vld1q_f32(wv + 0);
       float32x4_t w1v = vld1q_f32(wv + 4);
       a00 = vfmaq_n_f32(a00, w0v, s0[ci]); a01 = vfmaq_n_f32(a01, w1v, s0[ci]);
@@ -634,14 +686,14 @@ static void conv2d_1x1_packed_tile(
     float* d3 = output + (p0 + 3) * out_c + oc0;
     float* d4 = output + (p0 + 4) * out_c + oc0;
     float* d5 = output + (p0 + 5) * out_c + oc0;
-    float32x4_t a00 = vld1q_f32(bias + oc0 + 0), a01 = vld1q_f32(bias + oc0 + 4);
+    float32x4_t a00 = vld1q_f32(bias + 0), a01 = vld1q_f32(bias + 4);
     float32x4_t a10 = a00, a11 = a01;
     float32x4_t a20 = a00, a21 = a01;
     float32x4_t a30 = a00, a31 = a01;
     float32x4_t a40 = a00, a41 = a01;
     float32x4_t a50 = a00, a51 = a01;
     for (int ci = 0; ci < in_c; ++ci) {
-      const float* wv = weights + (size_t)ci * out_c + oc0;
+      const float* wv = weights + (size_t)ci * 8;
       float32x4_t w0v = vld1q_f32(wv + 0);
       float32x4_t w1v = vld1q_f32(wv + 4);
       a00 = vfmaq_n_f32(a00, w0v, s0[ci]); a01 = vfmaq_n_f32(a01, w1v, s0[ci]);
@@ -669,10 +721,10 @@ static void conv2d_1x1_packed_tile(
     for (int pi = 0; pi < p_count; ++pi) {
       const float* src = input + (p0 + (size_t)pi) * in_c;
       float* dst = output + (p0 + (size_t)pi) * out_c + oc0;
-      float32x4_t acc0 = vld1q_f32(bias + oc0);
-      float32x4_t acc1 = vld1q_f32(bias + oc0 + 4);
+      float32x4_t acc0 = vld1q_f32(bias);
+      float32x4_t acc1 = vld1q_f32(bias + 4);
       for (int ci = 0; ci < in_c; ++ci) {
-        const float* wv = weights + (size_t)ci * out_c + oc0;
+        const float* wv = weights + (size_t)ci * 8;
         float v = src[ci];
         acc0 = vfmaq_n_f32(acc0, vld1q_f32(wv), v);
         acc1 = vfmaq_n_f32(acc1, vld1q_f32(wv + 4), v);
@@ -689,9 +741,8 @@ static void conv2d_1x1_packed_tile(
     const float* src = input + (p0 + (size_t)pi) * in_c;
     float* dst = output + (p0 + (size_t)pi) * out_c + oc0;
     for (int o = 0; o < oc_count; ++o) {
-      int oc = oc0 + o;
-      float acc = bias[oc];
-      for (int ci = 0; ci < in_c; ++ci) acc += src[ci] * weights[(size_t)ci * out_c + oc];
+      float acc = bias[o];
+      for (int ci = 0; ci < in_c; ++ci) acc += src[ci] * weights[(size_t)ci * 8 + o];
       dst[o] = activate(acc, activation);
     }
   }
@@ -699,27 +750,26 @@ static void conv2d_1x1_packed_tile(
 
 static void op_conv2d_1x1_packed_tiles(PoseRuntime* rt, const PoseOpDef* op, int item0, int item1) {
   const float* input = (const float*)rt->tensor[op->inputs[0]];
-  const float* weights = (const float*)rt->packed[op->inputs[1]];
-  const float* bias = (const float*)rt->tensor[op->inputs[2]];
+  const PackedPointwiseX8* packed = (const PackedPointwiseX8*)rt->packed[op->inputs[1]];
   float* output = (float*)rt->tensor[op->outputs[0]];
-  const PoseTensorDef* in = &rt->def->tensors[op->inputs[0]];
   const PoseTensorDef* out = &rt->def->tensors[op->outputs[0]];
-  int in_c = in->dims[3], out_c = out->dims[3];
+  int out_c = out->dims[3];
   size_t pixels = (size_t)out->dims[1] * out->dims[2];
   int oc_blocks = (out_c + 7) / 8;
   for (int item = item0; item < item1; ++item) {
     size_t p0 = (size_t)(item / oc_blocks) * POSE_PW_TILE;
-    int oc0 = (item % oc_blocks) * 8;
+    int oc_block = item % oc_blocks;
+    int oc0 = oc_block * 8;
     int p_count = (int)(pixels - p0 < POSE_PW_TILE ? pixels - p0 : POSE_PW_TILE);
     int oc_count = out_c - oc0 < 8 ? out_c - oc0 : 8;
-    conv2d_1x1_packed_tile(input, weights, bias, output, p0, p_count, in_c, out_c, oc0, oc_count, op->activation);
+    conv2d_1x1_packed_tile(input, packed, output, p0, p_count, oc_block, oc_count, op->activation);
   }
 }
 
 static void op_conv2d_rows(PoseRuntime* rt, const PoseOpDef* op, int y0, int y1) {
   const float* input = (const float*)rt->tensor[op->inputs[0]];
   const float* weights_ohwi = (const float*)rt->tensor[op->inputs[1]];
-  const int packed_layout = rt->packed[op->inputs[1]] != NULL;
+  const int packed_layout = rt->packed_type[op->inputs[1]] == POSE_PACK_ICOC;
   const float* weights = packed_layout ? (const float*)rt->packed[op->inputs[1]] : weights_ohwi;
   const float* bias = (const float*)rt->tensor[op->inputs[2]];
   float* output = (float*)rt->tensor[op->outputs[0]];
@@ -768,7 +818,7 @@ static void op_conv2d_rows(PoseRuntime* rt, const PoseOpDef* op, int y0, int y1)
 }
 
 static void op_conv2d(PoseRuntime* rt, const PoseOpDef* op) {
-  if (rt->packed[op->inputs[1]]) {
+  if (rt->packed_type[op->inputs[1]] == POSE_PACK_POINTWISE_X8) {
     const PoseTensorDef* wt = &rt->def->tensors[op->inputs[1]];
     const PoseTensorDef* out = &rt->def->tensors[op->outputs[0]];
     if (wt->dims[1] == 1 && wt->dims[2] == 1 && op->stride_h == 1 && op->stride_w == 1) {
@@ -1415,8 +1465,9 @@ static void runtime_init(PoseRuntime* rt, const PoseModelDef* model, const char*
   rt->constants = load_constants(data_dir, model->const_file, &rt->constants_bytes);
   rt->tensor = (void**)calloc((size_t)model->tensor_count, sizeof(void*));
   rt->packed = (void**)calloc((size_t)model->tensor_count, sizeof(void*));
+  rt->packed_type = (uint8_t*)calloc((size_t)model->tensor_count, sizeof(uint8_t));
   rt->owned = (uint8_t*)calloc((size_t)model->tensor_count, sizeof(uint8_t));
-  if (!rt->tensor || !rt->packed || !rt->owned) {
+  if (!rt->tensor || !rt->packed || !rt->packed_type || !rt->owned) {
     fprintf(stderr, "runtime metadata allocation failed\n");
     exit(2);
   }
@@ -1451,8 +1502,15 @@ static void runtime_init(PoseRuntime* rt, const PoseModelDef* model, const char*
       if (!is_pointwise && !is_rgb_stride2) continue;
       int weight_idx = op->inputs[1];
       if (weight_idx < 0 || rt->packed[weight_idx]) continue;
-      rt->packed[weight_idx] = pack_conv_weights_icoc(
-          wt, (const float*)rt->tensor[weight_idx]);
+      if (is_pointwise) {
+        rt->packed[weight_idx] = pack_pointwise_x8(
+            wt, (const float*)rt->tensor[weight_idx], (const float*)rt->tensor[op->inputs[2]]);
+        rt->packed_type[weight_idx] = POSE_PACK_POINTWISE_X8;
+      } else {
+        rt->packed[weight_idx] = pack_conv_weights_icoc(
+            wt, (const float*)rt->tensor[weight_idx]);
+        rt->packed_type[weight_idx] = POSE_PACK_ICOC;
+      }
     }
   }
 }
@@ -1485,6 +1543,7 @@ static void runtime_destroy(PoseRuntime* rt) {
   }
   free(rt->tensor);
   free(rt->packed);
+  free(rt->packed_type);
   free(rt->owned);
   free(rt->constants);
 }

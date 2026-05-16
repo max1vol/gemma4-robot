@@ -400,3 +400,54 @@ End-to-end NEON reference path:
   - Interpretation:
     - The pure NEON tracked camera path is now within about 2% of the earlier theoretical `~6 FPS` target on 4 cores and exceeds 5 FPS on 3 cores.
     - The next model-compute target is still pointwise CONV2D. Depthwise improved enough that the remaining large raw buckets are detector/landmarker pointwise convolutions and detector acquisition latency.
+
+- 2026-05-16 pointwise 8-channel block packing pass:
+  - Fresh-context subagent review independently recommended changing pointwise packed weight layout before tile-size or assembly work.
+  - Runtime changes in `scripts/pose_neon_runtime.c`:
+    - Added `PosePackedType` and `PackedPointwiseX8`.
+    - Kept the first RGB `3x3 stride2` conv on the previous `[kh][kw][input_channel][output_channel]` packed layout.
+    - Repacked 1x1 pointwise weights by output-channel blocks of 8 with bias interleaved per block:
+      - block layout is `bias[8]` followed by `input_channel * weight_lanes[8]`.
+      - tail output channels are padded in the packed data but stores still write only real channels.
+    - Updated the 6x8/4x8/1x8 pointwise tile paths to read each 8-output-channel block contiguously instead of stepping by full `out_c` for every input channel.
+  - Build commands:
+    - `cc -O3 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o /tmp/pose_neon_runtime -lm -pthread`
+    - `container run --rm --arch arm64 -v "$PWD:/work" -w /work gemma4-xnnpack-build:bookworm-arm64 /bin/bash -lc 'gcc -Ofast -mcpu=cortex-a53 -std=c11 -Wall -Wextra -I out/pose_runtime_data scripts/pose_neon_runtime.c -o out/pose_neon_runtime_aarch64_ofast -lm -pthread'`
+  - Local correctness check before Pi run:
+    - `rm -rf /tmp/pose-det-pw-mac /tmp/pose-lm-pw-mac && mkdir -p /tmp/pose-det-pw-mac /tmp/pose-lm-pw-mac`
+    - `/tmp/pose_neon_runtime out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-pw-mac 4 1 out/pose_runtime_test_detector/ref`
+    - `/tmp/pose_neon_runtime out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-pw-mac 4 1 out/pose_runtime_test_noseg/ref`
+    - `/tmp/pose_neon_runtime pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-for-pose-pw-track-mac.json 4 3`
+    - Local tensor diffs stayed in the same range: detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`; landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.49e-5`.
+  - Copied to Pi and ran profile/raw/tracked validation:
+    - `tar -cf - out/pose_neon_runtime_aarch64_ofast | tailscale ssh max@pi3 'cd ~/gemma4-robot && tar -xf - && chmod +x out/pose_neon_runtime_aarch64_ofast && rm -rf /tmp/pose-det-pw /tmp/pose-lm-pw && mkdir -p /tmp/pose-det-pw /tmp/pose-lm-pw && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-pw 4 1 out/pose_runtime_test_detector/ref && POSE_PROFILE=1 ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-pw 4 1 out/pose_runtime_test_noseg/ref && for t in 2 3 4; do rm -rf /tmp/pose-det-pw-t$t /tmp/pose-lm-pw-t$t && mkdir -p /tmp/pose-det-pw-t$t /tmp/pose-lm-pw-t$t; ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data detector out/pose_runtime_test_detector/detector_input.bin /tmp/pose-det-pw-t$t $t 5 out/pose_runtime_test_detector/ref; ./out/pose_neon_runtime_aarch64_ofast out/pose_runtime_data landmarker out/pose_runtime_test_noseg/landmarker_input.bin /tmp/pose-lm-pw-t$t $t 5 out/pose_runtime_test_noseg/ref; done && for t in 2 3 4; do ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb-track out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-for-pose-pw-track-t$t.json $t 10; done'`
+    - Pi correctness remained in-range against LiteRT raw tensor references:
+      - detector tensor 441 max abs `5.264e-4`, tensor 429 max abs `3.357e-4`.
+      - landmarker tensor 310 max abs `8.278e-3`, tensor 315 `2.86e-14`, tensor 283 `5.188e-4`, tensor 312 `1.36e-5`.
+    - Raw model timings, `reps=5`:
+      - 2 cores: detector `398.498 ms`, landmarker `201.264 ms`, combined `599.762 ms` (`1.67 FPS`).
+      - 3 cores: detector `300.626 ms`, landmarker `163.721 ms`, combined `464.347 ms` (`2.15 FPS`).
+      - 4 cores: detector `299.480 ms`, landmarker `152.849 ms`, combined `452.329 ms` (`2.21 FPS`).
+    - Compared to the previous raw-model checkpoint:
+      - 4-core detector improved from `402.781 ms` to `299.480 ms`.
+      - 4-core landmarker improved from `163.532 ms` to `152.849 ms`.
+      - 4-core combined raw inference improved from `566.313 ms` to `452.329 ms`.
+    - Tracked camera-path timings, `reps=10`:
+      - 2 cores: acquisition `454.202 ms`; sample `9.062 ms`; landmarker `194.039 ms`; tracked frame `204.790 ms`; `4.883 FPS`.
+      - 3 cores: acquisition `345.951 ms`; sample `9.266 ms`; landmarker `155.049 ms`; tracked frame `165.836 ms`; `6.030 FPS`.
+      - 4 cores: acquisition `366.797 ms`; sample `9.221 ms`; landmarker `143.371 ms`; tracked frame `154.296 ms`; `6.481 FPS`.
+    - Compared to the previous tracked checkpoint:
+      - 4-core tracked frame improved from `170.087 ms` / `5.879 FPS` to `154.296 ms` / `6.481 FPS`.
+      - 3-core tracked frame improved from `185.872 ms` / `5.380 FPS` to `165.836 ms` / `6.030 FPS`.
+  - Full detector-every-frame pipeline after pointwise packing, `reps=5`:
+    - `tailscale ssh max@pi3 'cd ~/gemma4-robot && for t in 2 3 4; do ./out/pose_neon_runtime_aarch64_ofast pipeline-rgb out/pose_runtime_data out/human-for-pose.rgb 514 994 /tmp/human-for-pose-pw-full-t$t.json $t 5; done'`
+    - 2 cores: detector `426.982 ms`, landmarker `223.877 ms`, frame `673.812 ms`, `1.484 FPS`.
+    - 3 cores: detector `302.036 ms`, landmarker `157.508 ms`, frame `478.665 ms`, `2.089 FPS`.
+    - 4 cores: detector `269.124 ms`, landmarker `168.155 ms`, frame `456.944 ms`, `2.188 FPS`.
+  - Fetched Pi JSONs and compared final landmarks to official MediaPipe:
+    - tracked output: `pose_count=1`, `pose_presence=0.99358058`, selected rect `{x_center:0.548704624,y_center:0.460995644,width:2.31046009,height:1.19474483,rotation:-0.0186568499}`.
+    - tracked final pose landmarks vs official: max abs x `0.02175`, y `0.00626`, z `0.12991`; mean abs x `0.00591`, y `0.00223`, z `0.03345`.
+    - full detector-every-frame output: `pose_count=1`, `pose_presence=0.99475795`; final landmarks remain at the same C-vs-official detector/preprocess drift as before, max abs x `0.04231`, y `0.01098`, z `0.27118`.
+  - Interpretation:
+    - This is the first pointwise packing change that clearly improves both detector acquisition and tracked camera frames.
+    - The pure NEON path now exceeds the earlier `~6 FPS` tracked-frame target on both 3 and 4 cores for the provided sample, while preserving raw model correctness.

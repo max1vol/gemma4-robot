@@ -1,11 +1,12 @@
 # Gemma4 Robot
 
 Gemma4 Robot is a hardware project for helping a person build healthier daily
-habits. It combines a small local device, a camera, pose estimation, a voice
-assistant, and a pen plotter. The goal is to coach both physical activity and
-intellectual work in a way that feels concrete: the system can watch movement,
-talk with the user, create paper tasks, inspect the user's work, and write
-feedback back onto paper.
+habits through both physical exercise and mental workout with science and
+mathematics problems. It combines a small local device, a camera, pose
+estimation, a voice assistant, and a pen plotter. The goal is to coach both
+physical activity and intellectual work in a way that feels concrete: the system
+can watch movement, talk with the user, create paper tasks, inspect the user's
+work, and write feedback back onto paper.
 
 This repository is an entry for the [Gemma 4 Good Hackathon](https://www.kaggle.com/competitions/gemma-4-good-hackathon).
 Gemma 4 is the central brain of the system: it drives the assistant, helps turn

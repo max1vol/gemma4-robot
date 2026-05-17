@@ -9,7 +9,14 @@ User=max
 Group=max
 WorkingDirectory=/home/max/gemma4-robot
 Environment=HOME=/home/max
-ExecStart=/home/max/gemma4-robot/bin/gemma-agent-harness --env-file /home/max/gemma4-robot/.env --model gemma-4-31b-it voice-bot --playback-device plughw:1,0 --capture-device plughw:1,0 --startup-greeting=
+ExecStart=/home/max/gemma4-robot/bin/gemma-agent-harness --env-file /home/max/gemma4-robot/.env voice-bot --button-source microbit-serial --microbit-device auto --led-source none --playback-device plughw:vc4hdmi,0 --capture-device plughw:Camera,0 --sample-rate 48000 --channels 2 --transcription-provider none --tts-provider iphone --iphone-tts-backend fluid-kokoro-ane --fullscreen-terminal --startup-greeting=
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal+console
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
 Restart=always
 RestartSec=5
 

@@ -1,19 +1,59 @@
 #!/usr/bin/env python3
-"""Push-to-talk OpenAI voice chat for the AIY Voice HAT.
+"""Compatibility launcher for the current Rust voice agent.
 
-Hold the AIY button to record. Release it to transcribe, ask the Responses API,
-generate speech, and play the answer through the HAT speaker.
+The default path execs `bin/gemma-agent-harness`, using the micro:bit A button
+over USB serial, the USB webcam microphone, iPhone-hosted Gemma, iPhone Kokoro
+TTS, and HDMI playback. Set GEMMA_LEGACY_OPENAI_VOICE_BOT=1 to run the older
+AIY Voice HAT Python implementation below.
 """
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
+if os.environ.get("GEMMA_LEGACY_OPENAI_VOICE_BOT") != "1":
+    root = Path.home() / "gemma4-robot"
+    harness = root / "bin" / "gemma-agent-harness"
+    env_file = root / ".env"
+    os.execv(
+        str(harness),
+        [
+            str(harness),
+            "--env-file",
+            str(env_file),
+            "voice-bot",
+            "--button-source",
+            "microbit-serial",
+            "--microbit-device",
+            "auto",
+            "--led-source",
+            "none",
+            "--playback-device",
+            "plughw:vc4hdmi,0",
+            "--capture-device",
+            "plughw:Camera,0",
+            "--sample-rate",
+            "48000",
+            "--channels",
+            "2",
+            "--transcription-provider",
+            "none",
+            "--tts-provider",
+            "iphone",
+            "--iphone-tts-backend",
+            "fluid-kokoro-ane",
+            "--startup-greeting",
+            "",
+        ],
+    )
+
 import argparse
 import json
-import os
 import re
 import signal
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -21,7 +61,6 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from gpiozero import Button, LED
@@ -30,6 +69,12 @@ from gpiozero import Button, LED
 DEFAULT_BASE_DIR = Path.home() / "gemma4-robot" / "voice-chat"
 DEFAULT_ENV_FILE = Path.home() / "gemma4-robot" / ".env"
 DEFAULT_STATUS_FILE = Path.home() / "gemma4-robot" / "kiosk" / "status.json"
+DEFAULT_EXERCISE_STATUS_FILE = Path.home() / "gemma4-robot" / "kiosk" / "exercise_status.json"
+DEFAULT_EXERCISE_FRAME_FILE = Path.home() / "gemma4-robot" / "kiosk" / "exercise_frame.rgb"
+DEFAULT_EXERCISE_SCRIPT = Path.home() / "gemma4-robot" / "scripts" / "voice-kit" / "pose_preview_mode.py"
+DEFAULT_EXERCISE_LOG = Path("/tmp/gemma4-pose-preview.log")
+DEFAULT_POSE_RUNTIME = Path.home() / "gemma4-robot" / "out" / "pose_neon_runtime_aarch64_ofast"
+DEFAULT_POSE_DATA_DIR = Path.home() / "gemma4-robot" / "out" / "pose_runtime_data"
 VOICE_CARD_RE = re.compile(r"(google|voice|aiy|sndrpigoogle)", re.IGNORECASE)
 CARD_LINE_RE = re.compile(
     r"^card\s+(?P<card>\d+):\s+(?P<short>[^\[]+)\[(?P<long>[^\]]+)\],"
@@ -237,15 +282,27 @@ class VoiceChatBot:
         self.recordings_dir = self.base_dir / "recordings"
         self.speech_dir = self.base_dir / "speech"
         self.status_file = Path(args.status_file).expanduser()
+        self.exercise_status_file = Path(args.exercise_status_file).expanduser()
+        self.exercise_frame_file = Path(args.exercise_frame_file).expanduser()
+        self.exercise_script = Path(args.exercise_script).expanduser()
+        self.exercise_log = Path(args.exercise_log).expanduser()
         self.recordings_dir.mkdir(parents=True, exist_ok=True)
         self.speech_dir.mkdir(parents=True, exist_ok=True)
         self.status_file.parent.mkdir(parents=True, exist_ok=True)
+        self.exercise_status_file.parent.mkdir(parents=True, exist_ok=True)
 
         self.led = LED(args.led_gpio)
         self.lock = threading.RLock()
         self.recording_proc: subprocess.Popen[str] | None = None
         self.recording_path: Path | None = None
         self.recording_started = 0.0
+        self.exercise_proc: subprocess.Popen[str] | None = None
+        self.exercise_log_handle: Any | None = None
+        self.button_is_pressed = False
+        self.button_pressed_at = 0.0
+        self.second_click_active = False
+        self.pending_tap_timer: threading.Timer | None = None
+        self.recording_start_timer: threading.Timer | None = None
         self.previous_response_id: str | None = None
         self.turn_index = 0
         self.latest_input = ""
@@ -255,6 +312,7 @@ class VoiceChatBot:
 
     def write_status(self, state: str) -> None:
         payload = {
+            "mode": "camera" if state == "camera" else "voice",
             "state": state,
             "turn": self.turn_index,
             "input": self.latest_input,
@@ -290,37 +348,284 @@ class VoiceChatBot:
 
     def start_recording(self) -> None:
         with self.lock:
-            if self.recording_proc is not None:
-                print("Already recording; ignoring press.", flush=True)
+            self._start_recording_locked()
+
+    def _start_recording_locked(self) -> None:
+        if self.exercise_running_locked():
+            print("Camera preview is active; ignoring voice recording press.", flush=True)
+            return
+        if self.recording_proc is not None:
+            print("Already recording; ignoring press.", flush=True)
+            return
+        self.turn_index += 1
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = self.recordings_dir / f"turn-{self.turn_index:03d}-{stamp}.wav"
+        command = [
+            "arecord",
+            "-q",
+            "-D",
+            self.capture,
+            "-f",
+            "S16_LE",
+            "-r",
+            str(self.args.sample_rate),
+            "-c",
+            str(self.args.channels),
+            str(path),
+        ]
+        self.set_recording_light()
+        self.recording_path = path
+        self.recording_started = time.monotonic()
+        self.recording_proc = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        self.latest_error = ""
+        self.write_status("recording")
+        print(f"Recording to {path}", flush=True)
+
+    def exercise_running_locked(self) -> bool:
+        return self.exercise_proc is not None and self.exercise_proc.poll() is None
+
+    def cancel_pending_tap_locked(self) -> None:
+        if self.pending_tap_timer is not None:
+            self.pending_tap_timer.cancel()
+            self.pending_tap_timer = None
+
+    def cancel_recording_start_locked(self) -> None:
+        if self.recording_start_timer is not None:
+            self.recording_start_timer.cancel()
+            self.recording_start_timer = None
+
+    def schedule_recording_start_locked(self) -> None:
+        self.cancel_recording_start_locked()
+        timer = threading.Timer(self.args.hold_start_seconds, self.start_recording_if_button_still_down)
+        timer.daemon = True
+        self.recording_start_timer = timer
+        timer.start()
+
+    def start_recording_if_button_still_down(self) -> None:
+        with self.lock:
+            self.recording_start_timer = None
+            if not self.button_is_pressed or self.second_click_active:
                 return
-            self.turn_index += 1
-            stamp = time.strftime("%Y%m%d-%H%M%S")
-            path = self.recordings_dir / f"turn-{self.turn_index:03d}-{stamp}.wav"
-            command = [
-                "arecord",
-                "-q",
-                "-D",
-                self.capture,
-                "-f",
-                "S16_LE",
-                "-r",
-                str(self.args.sample_rate),
-                "-c",
-                str(self.args.channels),
-                str(path),
-            ]
-            self.set_recording_light()
-            self.recording_path = path
-            self.recording_started = time.monotonic()
-            self.recording_proc = subprocess.Popen(
+            self._start_recording_locked()
+
+    def schedule_single_tap_locked(self) -> None:
+        self.cancel_pending_tap_locked()
+        timer = threading.Timer(self.args.double_click_seconds, self.handle_single_tap_timeout)
+        timer.daemon = True
+        self.pending_tap_timer = timer
+        timer.start()
+
+    def handle_single_tap_timeout(self) -> None:
+        with self.lock:
+            self.pending_tap_timer = None
+            if self.exercise_running_locked():
+                return
+        self.set_ready_light()
+        self.reset_conversation(f"single tap shorter than {self.args.tap_reset_seconds:.2f}s")
+
+    def handle_button_pressed(self) -> None:
+        now = time.monotonic()
+        with self.lock:
+            self.button_is_pressed = True
+            self.button_pressed_at = now
+            if self.pending_tap_timer is not None:
+                self.cancel_pending_tap_locked()
+                self.cancel_recording_start_locked()
+                self.second_click_active = True
+                return
+
+            self.second_click_active = False
+            if not self.exercise_running_locked():
+                self.schedule_recording_start_locked()
+
+    def handle_button_released(self) -> None:
+        now = time.monotonic()
+        should_toggle_exercise = False
+        should_stop_recording = False
+        with self.lock:
+            held = max(0.0, now - self.button_pressed_at)
+            self.button_is_pressed = False
+            self.cancel_recording_start_locked()
+
+            if self.second_click_active:
+                should_toggle_exercise = held <= self.args.double_click_press_seconds
+                self.second_click_active = False
+            elif self.recording_proc is not None:
+                should_stop_recording = True
+            elif held < self.args.tap_reset_seconds:
+                self.schedule_single_tap_locked()
+
+        if should_toggle_exercise:
+            threading.Thread(target=self.toggle_exercise_mode, daemon=True).start()
+        elif should_stop_recording:
+            self.stop_recording()
+
+    def terminate_current_recording(self) -> None:
+        with self.lock:
+            proc = self.recording_proc
+            self.recording_proc = None
+            self.recording_path = None
+        if proc is None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=2)
+
+    def exercise_command(self) -> list[str]:
+        return [
+            sys.executable,
+            str(self.exercise_script),
+            "--pose-runtime",
+            str(Path(self.args.pose_runtime).expanduser()),
+            "--pose-data-dir",
+            str(Path(self.args.pose_data_dir).expanduser()),
+            "--width",
+            str(self.args.exercise_width),
+            "--height",
+            str(self.args.exercise_height),
+            "--framerate",
+            str(self.args.camera_framerate),
+            "--roi",
+            self.args.camera_roi,
+            "--threads",
+            str(self.args.exercise_threads),
+            "--cores",
+            self.args.exercise_cores,
+            "--latency-log",
+            str(self.args.pose_latency_log),
+        ]
+
+    def stop_kiosk_processes(self) -> None:
+        uid = str(os.getuid())
+        patterns = [
+            "chromium.*chromium-kiosk-profile",
+            "openbox",
+            "Xorg :0",
+            "startx /tmp/gemma4-kiosk-xinitrc",
+            "python3 -m http.server 8765",
+        ]
+        for signal_name in ["-TERM", "-KILL"]:
+            for pattern in patterns:
+                subprocess.run(
+                    ["pkill", signal_name, "-u", uid, "-f", pattern],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            if signal_name == "-TERM":
+                time.sleep(1.0)
+
+    def pose_exercise_command(self) -> list[str]:
+        return [
+            sys.executable,
+            str(self.exercise_script),
+            "--status-file",
+            str(self.exercise_status_file),
+            "--frame-file",
+            str(self.exercise_frame_file),
+            "--pose-runtime",
+            str(Path(self.args.pose_runtime).expanduser()),
+            "--pose-data-dir",
+            str(Path(self.args.pose_data_dir).expanduser()),
+            "--width",
+            str(self.args.exercise_width),
+            "--height",
+            str(self.args.exercise_height),
+            "--threads",
+            str(self.args.exercise_threads),
+        ]
+
+    def start_exercise_mode(self) -> None:
+        self.terminate_current_recording()
+        self.stop_kiosk_processes()
+        with self.lock:
+            if self.exercise_running_locked():
+                return
+            self.cancel_pending_tap_locked()
+            self.cancel_recording_start_locked()
+            self.exercise_log.parent.mkdir(parents=True, exist_ok=True)
+            self.exercise_log_handle = self.exercise_log.open("a", buffering=1)
+            command = self.exercise_command()
+            self.exercise_proc = subprocess.Popen(
                 command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=self.exercise_log_handle,
+                stderr=subprocess.STDOUT,
                 text=True,
+                start_new_session=True,
             )
+            self.latest_input = "Pose preview"
+            self.latest_output = "Camera with pose skeleton overlay"
             self.latest_error = ""
-            self.write_status("recording")
-            print(f"Recording to {path}", flush=True)
+            self.write_status("camera")
+            self.led.blink(on_time=0.12, off_time=0.88, background=True)
+            print(f"Pose preview started with pid {self.exercise_proc.pid}; log={self.exercise_log}", flush=True)
+            threading.Thread(
+                target=self.monitor_exercise_process,
+                args=(self.exercise_proc,),
+                daemon=True,
+            ).start()
+
+    def monitor_exercise_process(self, proc: subprocess.Popen[str]) -> None:
+        rc = proc.wait()
+        with self.lock:
+            if self.exercise_proc is not proc:
+                return
+            log_handle = self.exercise_log_handle
+            self.exercise_proc = None
+            self.exercise_log_handle = None
+            self.latest_input = ""
+            self.latest_output = ""
+            self.latest_error = "" if rc == 0 else f"Pose preview exited with {rc}."
+            self.write_status("idle" if rc == 0 else "error")
+            self.set_ready_light()
+        if log_handle is not None:
+            log_handle.close()
+        print(f"Pose preview process exited with {rc}.", flush=True)
+
+    def stop_exercise_mode(self) -> None:
+        with self.lock:
+            proc = self.exercise_proc
+            log_handle = self.exercise_log_handle
+            self.exercise_proc = None
+            self.exercise_log_handle = None
+            self.latest_input = ""
+            self.latest_output = ""
+            self.latest_error = ""
+            self.write_status("idle")
+            self.set_ready_light()
+
+        if proc is not None and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.wait(timeout=2)
+        if log_handle is not None:
+            log_handle.close()
+        print("Pose preview stopped; voice assistant ready.", flush=True)
+
+    def toggle_exercise_mode(self) -> None:
+        with self.lock:
+            running = self.exercise_running_locked()
+        if running:
+            self.stop_exercise_mode()
+        else:
+            self.start_exercise_mode()
 
     def stop_recording(self) -> None:
         with self.lock:
@@ -477,6 +782,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--env-file", default=str(DEFAULT_ENV_FILE), help="file containing OPENAI_API_KEY")
     parser.add_argument("--base-dir", default=str(DEFAULT_BASE_DIR), help="directory for recordings and speech")
     parser.add_argument("--status-file", default=str(DEFAULT_STATUS_FILE), help="JSON status file for kiosk display")
+    parser.add_argument("--exercise-status-file", default=str(DEFAULT_EXERCISE_STATUS_FILE), help="exercise JSON status file for kiosk display")
+    parser.add_argument("--exercise-frame-file", default=str(DEFAULT_EXERCISE_FRAME_FILE), help="raw RGB camera frame for kiosk display")
+    parser.add_argument("--exercise-script", default=str(DEFAULT_EXERCISE_SCRIPT), help="pose preview runner")
+    parser.add_argument("--exercise-log", default=str(DEFAULT_EXERCISE_LOG), help="pose preview process log file")
+    parser.add_argument("--pose-runtime", default=str(DEFAULT_POSE_RUNTIME), help="pose runtime binary used by exercise mode")
+    parser.add_argument("--pose-data-dir", default=str(DEFAULT_POSE_DATA_DIR), help="pose runtime data directory")
+    parser.add_argument("--exercise-width", type=int, default=320, help="exercise camera frame width")
+    parser.add_argument("--exercise-height", type=int, default=240, help="exercise camera frame height")
+    parser.add_argument("--exercise-threads", type=int, default=2, help="pose runtime worker threads for pose preview")
+    parser.add_argument("--exercise-cores", default="0,1", help="CPU cores allowed for pose runtime")
+    parser.add_argument("--pose-latency-log", default="/tmp/gemma4-pose-preview-latencies.jsonl", help="pose preview latency JSONL log")
+    parser.add_argument("--camera-preview-command", default="rpicam-hello", help="command used for direct HDMI camera preview")
+    parser.add_argument("--camera-width", type=int, default=1280, help="direct preview stream width")
+    parser.add_argument("--camera-height", type=int, default=720, help="direct preview stream height")
+    parser.add_argument("--camera-framerate", type=float, default=8.0, help="pose preview camera stream FPS")
+    parser.add_argument("--camera-mode", default="", help="optional rpicam camera mode")
+    parser.add_argument("--camera-info-text", default="", help="optional rpicam preview overlay text")
+    parser.add_argument("--camera-roi", default="", help="optional center crop for pose preview; empty keeps maximum field of view")
     parser.add_argument("--button-gpio", type=int, default=23, help="BCM GPIO for the AIY button")
     parser.add_argument("--led-gpio", type=int, default=25, help="BCM GPIO for the AIY button LED")
     parser.add_argument("--playback-device", help="explicit ALSA playback device, e.g. plughw:1,0")
@@ -484,6 +807,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-rate", type=int, default=16000, help="recording sample rate")
     parser.add_argument("--channels", type=int, default=1, help="recording channel count")
     parser.add_argument("--tap-reset-seconds", type=float, default=0.35, help="tap shorter than this resets chat")
+    parser.add_argument("--double-click-seconds", type=float, default=0.55, help="max gap between short clicks for pose preview toggle")
+    parser.add_argument("--double-click-press-seconds", type=float, default=0.45, help="max duration for the second pose-preview click")
+    parser.add_argument("--hold-start-seconds", type=float, default=0.28, help="delay before push-to-talk recording starts")
     parser.add_argument("--response-model", default="gpt-5.5", help="Responses API model")
     parser.add_argument("--transcription-model", default="whisper-1", help="audio transcription model")
     parser.add_argument("--tts-model", default="gpt-4o-mini-tts", help="speech model")
@@ -527,16 +853,29 @@ def main() -> None:
         return
 
     button = Button(args.button_gpio, pull_up=True, bounce_time=0.05)
-    button.when_pressed = bot.start_recording
-    button.when_released = bot.stop_recording
+    button.when_pressed = bot.handle_button_pressed
+    button.when_released = bot.handle_button_released
 
     bot.speak_startup_greeting()
     print(
         f"Ready. Hold the button on BCM GPIO {args.button_gpio} to talk; "
-        f"tap shorter than {args.tap_reset_seconds:.2f}s to reset.",
+        f"tap shorter than {args.tap_reset_seconds:.2f}s to reset; "
+        "double-click to toggle pose preview.",
         flush=True,
     )
-    signal.pause()
+
+    def shutdown(_signum: int, _frame: object) -> None:
+        bot.stop_exercise_mode()
+        raise SystemExit(0)
+
+    def toggle_camera_preview(_signum: int, _frame: object) -> None:
+        threading.Thread(target=bot.toggle_exercise_mode, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGUSR1, toggle_camera_preview)
+    while True:
+        signal.pause()
 
 
 if __name__ == "__main__":

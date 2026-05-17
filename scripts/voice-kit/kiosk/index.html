@@ -3,16 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gemma Voice Display</title>
+  <title>Gemma Display</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #090b10;
-      --panel: #111720;
-      --panel-2: #151c26;
+      --bg: #08090b;
+      --panel: #121820;
+      --panel-2: #18202a;
       --text: #f4f7fb;
-      --muted: #9aa8b8;
-      --accent: #60d394;
+      --muted: #a7b2bd;
+      --accent: #55d17f;
+      --line: #52e2ff;
+      --joint: #fff06a;
       --wait: #f0c46a;
       --error: #ff6b6b;
       font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -39,9 +41,13 @@
       padding: 12px;
     }
 
+    main.exercise {
+      grid-template-rows: 54px 1fr;
+    }
+
     header {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
       min-width: 0;
       padding: 0 4px;
@@ -64,14 +70,18 @@
       color: var(--muted);
       font-size: 16px;
       white-space: nowrap;
+      max-width: 42vw;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .dot {
+      flex: 0 0 auto;
       width: 14px;
       height: 14px;
       border-radius: 50%;
       background: var(--accent);
-      box-shadow: 0 0 16px rgba(96, 211, 148, 0.8);
+      box-shadow: 0 0 16px rgba(85, 209, 127, 0.8);
     }
 
     .busy .dot {
@@ -122,38 +132,144 @@
       font-weight: 550;
     }
 
+    .exercise-stage {
+      display: none;
+      position: relative;
+      min-height: 0;
+      padding: 0;
+      background: #050607;
+    }
+
+    main.exercise .voice-panel {
+      display: none;
+    }
+
+    main.exercise .exercise-stage {
+      display: block;
+    }
+
+    #exerciseCanvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      image-rendering: auto;
+      background: #050607;
+    }
+
+    .hud {
+      position: absolute;
+      left: 14px;
+      right: 14px;
+      top: 12px;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      pointer-events: none;
+    }
+
+    .metric {
+      min-width: 0;
+      padding: 10px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      background: rgba(5, 6, 7, 0.74);
+      backdrop-filter: blur(3px);
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+      letter-spacing: 0;
+      white-space: nowrap;
+    }
+
+    .metric-value {
+      margin-top: 2px;
+      font-size: 28px;
+      line-height: 1;
+      font-weight: 780;
+      letter-spacing: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .meta {
       position: fixed;
       right: 14px;
       bottom: 8px;
-      color: #556273;
+      color: #566272;
       font-size: 12px;
+    }
+
+    @media (max-width: 760px) {
+      main {
+        padding: 8px;
+        gap: 8px;
+      }
+
+      .hud {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .text {
+        font-size: 24px;
+      }
     }
   </style>
 </head>
 <body>
   <main id="root">
     <header>
-      <h1>Gemma Voice</h1>
+      <h1 id="title">Gemma Voice</h1>
       <div class="status" id="status"><span class="dot"></span><span id="statusText">Starting</span></div>
     </header>
-    <section>
+    <section class="voice-panel">
       <h2>Input</h2>
       <div class="text placeholder" id="input">Hold the button and speak.</div>
     </section>
-    <section class="output">
+    <section class="voice-panel output">
       <h2>Model Output</h2>
       <div class="text placeholder" id="output">The response will appear here.</div>
+    </section>
+    <section class="exercise-stage" id="exerciseStage">
+      <canvas id="exerciseCanvas" width="320" height="240"></canvas>
+      <div class="hud">
+        <div class="metric">
+          <div class="metric-label">Squats</div>
+          <div class="metric-value" id="squatCount">0</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Phase</div>
+          <div class="metric-value" id="squatPhase">--</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Knee</div>
+          <div class="metric-value" id="kneeAngle">--</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">FPS</div>
+          <div class="metric-value" id="exerciseFps">--</div>
+        </div>
+      </div>
     </section>
   </main>
   <div class="meta" id="updated"></div>
 
   <script>
     const root = document.getElementById("root");
+    const title = document.getElementById("title");
     const input = document.getElementById("input");
     const output = document.getElementById("output");
     const statusText = document.getElementById("statusText");
     const updated = document.getElementById("updated");
+    const canvas = document.getElementById("exerciseCanvas");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const squatCount = document.getElementById("squatCount");
+    const squatPhase = document.getElementById("squatPhase");
+    const kneeAngle = document.getElementById("kneeAngle");
+    const exerciseFps = document.getElementById("exerciseFps");
 
     const labels = {
       idle: "Ready",
@@ -162,12 +278,137 @@
       thinking: "Thinking",
       speaking: "Speaking",
       reset: "Reset",
+      exercise: "Exercise",
+      active: "Exercise",
+      no_pose: "No Pose",
+      starting: "Starting",
+      stopped: "Stopped",
       error: "Error"
     };
+
+    const connections = [
+      [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
+      [11, 23], [12, 24], [23, 24],
+      [23, 25], [25, 27], [27, 29], [29, 31], [27, 31],
+      [24, 26], [26, 28], [28, 30], [30, 32], [28, 32],
+      [0, 1], [1, 2], [2, 3], [3, 7],
+      [0, 4], [4, 5], [5, 6], [6, 8],
+      [9, 10]
+    ];
+
+    let lastFrameSeq = -1;
+    let lastFramePath = "";
 
     function setText(node, text, fallback) {
       node.textContent = text || fallback;
       node.classList.toggle("placeholder", !text);
+    }
+
+    function numberText(value, digits = 0) {
+      return Number.isFinite(value) ? value.toFixed(digits) : "--";
+    }
+
+    function landmarkQuality(landmark) {
+      if (!landmark) return 0;
+      return Math.min(Number(landmark.visibility) || 0, Number(landmark.presence) || 0);
+    }
+
+    function drawSkeleton(landmarks, width, height) {
+      if (!Array.isArray(landmarks) || landmarks.length < 33) return;
+      ctx.save();
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = Math.max(3, width / 130);
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--line").trim();
+      ctx.shadowColor = "rgba(0, 0, 0, 0.75)";
+      ctx.shadowBlur = 4;
+
+      for (const [a, b] of connections) {
+        const first = landmarks[a];
+        const second = landmarks[b];
+        if (landmarkQuality(first) < 0.2 || landmarkQuality(second) < 0.2) continue;
+        ctx.beginPath();
+        ctx.moveTo(first.x * width, first.y * height);
+        ctx.lineTo(second.x * width, second.y * height);
+        ctx.stroke();
+      }
+
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--joint").trim();
+      for (const landmark of landmarks) {
+        if (landmarkQuality(landmark) < 0.2) continue;
+        ctx.beginPath();
+        ctx.arc(landmark.x * width, landmark.y * height, Math.max(3, width / 115), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    async function drawFrame(status) {
+      const width = status.frame_width || 320;
+      const height = status.frame_height || 240;
+      const framePath = status.frame_path || "exercise_frame.rgb";
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+        lastFrameSeq = -1;
+      }
+
+      if (status.frame_seq !== lastFrameSeq || framePath !== lastFramePath) {
+        const response = await fetch(`/${framePath}?seq=${status.frame_seq}&ts=${Date.now()}`, { cache: "no-store" });
+        if (response.ok) {
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          if (bytes.length >= width * height * 3) {
+            const rgba = new Uint8ClampedArray(width * height * 4);
+            for (let i = 0, j = 0; i < width * height * 3; i += 3, j += 4) {
+              rgba[j] = bytes[i];
+              rgba[j + 1] = bytes[i + 1];
+              rgba[j + 2] = bytes[i + 2];
+              rgba[j + 3] = 255;
+            }
+            ctx.putImageData(new ImageData(rgba, width, height), 0, 0);
+            lastFrameSeq = status.frame_seq;
+            lastFramePath = framePath;
+          }
+        }
+      }
+
+      drawSkeleton(status.landmarks, width, height);
+    }
+
+    async function showExercise() {
+      root.classList.add("exercise");
+      title.textContent = "Exercise";
+      try {
+        const response = await fetch(`/exercise_status.json?ts=${Date.now()}`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const status = await response.json();
+        const state = status.state || "starting";
+        root.classList.toggle("busy", ["starting"].includes(state));
+        root.classList.toggle("error", state === "error");
+        statusText.textContent = status.error ? `${labels[state] || state}: ${status.error}` : (labels[state] || state);
+        squatCount.textContent = `${status.squats || 0}`;
+        squatPhase.textContent = status.squat_phase || "--";
+        kneeAngle.textContent = numberText(Number(status.knee_angle), 0);
+        exerciseFps.textContent = numberText(Number(status.fps), 1);
+        updated.textContent = status.updated_at || "";
+        await drawFrame(status);
+      } catch (error) {
+        root.classList.add("error");
+        statusText.textContent = `Exercise display disconnected: ${error.message}`;
+      }
+    }
+
+    function showVoice(status) {
+      root.classList.remove("exercise");
+      title.textContent = "Gemma Voice";
+      const state = status.state || "idle";
+      root.classList.toggle("busy", ["recording", "processing", "thinking", "speaking"].includes(state));
+      root.classList.toggle("error", state === "error");
+      statusText.textContent = status.error ? `${labels[state] || state}: ${status.error}` : (labels[state] || state);
+      setText(input, status.input, "Hold the button and speak.");
+      setText(output, status.output, "The response will appear here.");
+      updated.textContent = status.updated_at || "";
     }
 
     async function refresh() {
@@ -175,13 +416,11 @@
         const response = await fetch(`/status.json?ts=${Date.now()}`, { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const status = await response.json();
-        const state = status.state || "idle";
-        root.classList.toggle("busy", ["recording", "processing", "thinking", "speaking"].includes(state));
-        root.classList.toggle("error", state === "error");
-        statusText.textContent = status.error ? `${labels[state] || state}: ${status.error}` : (labels[state] || state);
-        setText(input, status.input, "Hold the button and speak.");
-        setText(output, status.output, "The response will appear here.");
-        updated.textContent = status.updated_at || "";
+        if (status.state === "exercise" || status.mode === "exercise") {
+          await showExercise();
+        } else {
+          showVoice(status);
+        }
       } catch (error) {
         root.classList.add("error");
         statusText.textContent = `Display disconnected: ${error.message}`;

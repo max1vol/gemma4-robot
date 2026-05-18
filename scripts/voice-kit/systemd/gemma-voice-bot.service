@@ -9,14 +9,10 @@ User=max
 Group=max
 WorkingDirectory=/home/max/gemma4-robot
 Environment=HOME=/home/max
-ExecStart=/home/max/gemma4-robot/bin/gemma-agent-harness --env-file /home/max/gemma4-robot/.env voice-bot --button-source microbit-serial --microbit-device auto --led-source none --playback-device plughw:vc4hdmi,0 --capture-device plughw:Camera,0 --sample-rate 48000 --channels 2 --transcription-provider none --tts-provider iphone --iphone-tts-backend fluid-kokoro-ane --fullscreen-terminal --startup-greeting=
-StandardInput=tty
-StandardOutput=tty
-StandardError=journal+console
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
-TTYVTDisallocate=yes
+ExecStart=/home/max/gemma4-robot/bin/gemma-agent-harness --env-file /home/max/gemma4-robot/.env --instructions-file /home/max/gemma4-robot/agent-harness/prompts/fitness_coach.md --tool-config /home/max/gemma4-robot/agent-harness/config/fitness_coach_tools.json --max-tool-rounds 8 --ios-bridge-timeout-seconds 120 voice-bot --button-source microbit-serial --microbit-device auto --led-source none --playback-device plughw:vc4hdmi,0 --capture-device plughw:Camera,0 --sample-rate 48000 --channels 2 --transcription-provider none --tts-provider iphone --iphone-tts-backend piper-ryan-high --fullscreen-terminal --startup-greeting= "--startup-agent-prompt=Start the robot session. Follow the system instructions."
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
 Restart=always
 RestartSec=5
 

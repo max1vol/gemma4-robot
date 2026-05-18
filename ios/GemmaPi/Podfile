@@ -1,8 +1,0 @@
-platform :ios, '17.0'
-
-project 'GemmaPi.xcodeproj'
-
-target 'GemmaPi' do
-  use_frameworks!
-  pod 'MediaPipeTasksVision', '~> 0.10.35'
-end

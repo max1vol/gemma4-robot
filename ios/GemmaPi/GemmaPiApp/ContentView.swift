@@ -182,8 +182,12 @@ struct ContentView: View {
           }
           .pickerStyle(.menu)
           .onChange(of: bridge.selectedTTSBackend) { _, newValue in
-            bridge.selectedTTSVoice = PhoneTTSBackend.parse(newValue).defaultVoice
-            Task { await bridge.previewSelectedTTSVoice() }
+            let defaultVoice = PhoneTTSBackend.parse(newValue).defaultVoice
+            if bridge.selectedTTSVoice == defaultVoice {
+              Task { await bridge.previewSelectedTTSVoice() }
+            } else {
+              bridge.selectedTTSVoice = defaultVoice
+            }
           }
 
           Picker("TTS voice", selection: $bridge.selectedTTSVoice) {
@@ -201,11 +205,29 @@ struct ContentView: View {
           } label: {
             Label("Preview Voice", systemImage: "speaker.wave.2")
           }
-          .disabled(bridge.isSpeakingLocalTest)
+          .disabled(bridge.isSpeakingLocalTest || bridge.isRunningLocalTest || bridge.isAudioCaptureActive)
 
-          Text(bridge.lastTTSStatus)
+          if let progress = bridge.ttsDownloadProgress {
+            VStack(alignment: .leading, spacing: 6) {
+              Text(progress.title)
+                .font(.caption.weight(.semibold))
+              if let fraction = progress.fractionCompleted {
+                ProgressView(value: fraction)
+              } else {
+                ProgressView()
+              }
+              Text(progress.detail)
+                .foregroundStyle(.secondary)
+            }
+            .progressViewStyle(.linear)
             .font(.footnote)
-            .foregroundStyle(.secondary)
+          }
+
+          if bridge.ttsDownloadProgress == nil {
+            Text(bridge.lastTTSStatus)
+              .font(.footnote)
+              .foregroundStyle(.secondary)
+          }
         }
 
         Section("Model Test") {
@@ -216,30 +238,30 @@ struct ContentView: View {
             .lineLimit(2...5)
 
           HStack {
+            Button {} label: {
+              Label(
+                bridge.isStartingAudioCapture ? "Starting Mic..." : bridge.isRecordingAudio ? "Recording Audio..." : "Hold to Talk",
+                systemImage: bridge.isRecordingAudio ? "mic.fill" : "mic"
+              )
+            }
+            .disabled(!bridge.runtimeReady || bridge.isRunningLocalTest || bridge.isSpeakingLocalTest)
+            .simultaneousGesture(
+              DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                  guard !bridge.isAudioCaptureActive else { return }
+                  bridge.beginHoldToTalkCapture()
+                }
+                .onEnded { _ in
+                  bridge.endHoldToTalkCapture()
+                }
+            )
+
             Button {
               Task { await bridge.speakLocalTestResponse() }
             } label: {
               Label("Speak", systemImage: "speaker.wave.2")
             }
-            .disabled(bridge.localTestResponse.isEmpty || bridge.isSpeakingLocalTest)
-
-            Button {} label: {
-              Label(
-                bridge.isRecordingAudio ? "Recording Audio..." : "Hold to Talk",
-                systemImage: bridge.isRecordingAudio ? "mic.fill" : "mic"
-              )
-            }
-            .disabled(!bridge.runtimeReady || bridge.isRunningLocalTest)
-            .simultaneousGesture(
-              DragGesture(minimumDistance: 0)
-                .onChanged { _ in
-                  guard !bridge.isRecordingAudio else { return }
-                  Task { await bridge.startAudioCapture() }
-                }
-                .onEnded { _ in
-                  Task { await bridge.finishAudioCaptureAndSend() }
-                }
-            )
+            .disabled(bridge.localTestResponse.isEmpty || bridge.isSpeakingLocalTest || bridge.isRunningLocalTest || bridge.isAudioCaptureActive)
           }
 
           Button {
@@ -247,9 +269,9 @@ struct ContentView: View {
           } label: {
             Label("Send to Model", systemImage: "paperplane")
           }
-          .disabled(!bridge.runtimeReady || bridge.isRunningLocalTest || bridge.isRecordingAudio)
+          .disabled(!bridge.runtimeReady || bridge.isRunningLocalTest || bridge.isAudioCaptureActive || bridge.isSpeakingLocalTest)
 
-          if bridge.isRunningLocalTest || bridge.isRecordingAudio || bridge.isSpeakingLocalTest {
+          if bridge.isRunningLocalTest || bridge.isAudioCaptureActive || bridge.isSpeakingLocalTest {
             ProgressView()
           }
 
@@ -336,6 +358,8 @@ struct ContentView: View {
         AppLog.info("Launch requested Pi bridge auto-connect without runtime auto-load")
         bridge.connect()
       }
+      await runLaunchAudioThenTTSSmokeIfRequested()
+      await runLaunchAudioGemmaSpeakSmokeIfRequested()
       await runLaunchTTSPreviewIfRequested()
       return
     }
@@ -346,6 +370,8 @@ struct ContentView: View {
         AppLog.info("Launch requested Pi bridge auto-connect without runtime auto-load")
         bridge.connect()
       }
+      await runLaunchAudioThenTTSSmokeIfRequested()
+      await runLaunchAudioGemmaSpeakSmokeIfRequested()
       await runLaunchTTSPreviewIfRequested()
       return
     }
@@ -360,6 +386,8 @@ struct ContentView: View {
       AppLog.info("Launch requested Pi bridge auto-connect")
       bridge.connect()
     }
+    await runLaunchAudioThenTTSSmokeIfRequested()
+    await runLaunchAudioGemmaSpeakSmokeIfRequested()
     await runLaunchTTSPreviewIfRequested()
     await runLaunchAudioRecordingSmokeIfRequested()
   }
@@ -378,6 +406,20 @@ struct ContentView: View {
     await bridge.runAudioCaptureSmokeTest()
   }
 
+  @MainActor
+  private func runLaunchAudioThenTTSSmokeIfRequested() async {
+    guard Self.audioThenTTSSmokeRequested else { return }
+    AppLog.info("Launch requested audio to TTS smoke test")
+    await bridge.runAudioThenTTSSmokeTest()
+  }
+
+  @MainActor
+  private func runLaunchAudioGemmaSpeakSmokeIfRequested() async {
+    guard Self.audioGemmaSpeakSmokeRequested else { return }
+    AppLog.info("Launch requested audio Gemma Speak smoke test")
+    await bridge.runAudioGemmaSpeakSmokeTest()
+  }
+
   private static var autoConnectRequested: Bool {
     let arguments = ProcessInfo.processInfo.arguments
     let environment = ProcessInfo.processInfo.environment
@@ -390,6 +432,7 @@ struct ContentView: View {
     let environment = ProcessInfo.processInfo.environment
     return arguments.contains("--no-auto-load")
       || environment["GEMMAPI_NO_AUTO_LOAD"] == "1"
+      || debugLaunchTTSPreviewByDefault
   }
 
   private static var ttsPreviewRequested: Bool {
@@ -397,6 +440,11 @@ struct ContentView: View {
     let environment = ProcessInfo.processInfo.environment
     return arguments.contains("--tts-preview")
       || environment["GEMMAPI_TTS_PREVIEW"] == "1"
+      || debugLaunchTTSPreviewByDefault
+  }
+
+  private static var debugLaunchTTSPreviewByDefault: Bool {
+    false
   }
 
   private static var audioRecordingSmokeRequested: Bool {
@@ -404,5 +452,19 @@ struct ContentView: View {
     let environment = ProcessInfo.processInfo.environment
     return arguments.contains("--audio-recording-smoke")
       || environment["GEMMAPI_AUDIO_RECORDING_SMOKE"] == "1"
+  }
+
+  private static var audioThenTTSSmokeRequested: Bool {
+    let arguments = ProcessInfo.processInfo.arguments
+    let environment = ProcessInfo.processInfo.environment
+    return arguments.contains("--audio-then-tts-smoke")
+      || environment["GEMMAPI_AUDIO_THEN_TTS_SMOKE"] == "1"
+  }
+
+  private static var audioGemmaSpeakSmokeRequested: Bool {
+    let arguments = ProcessInfo.processInfo.arguments
+    let environment = ProcessInfo.processInfo.environment
+    return arguments.contains("--audio-gemma-speak-smoke")
+      || environment["GEMMAPI_AUDIO_GEMMA_SPEAK_SMOKE"] == "1"
   }
 }

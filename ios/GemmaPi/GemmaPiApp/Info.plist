@@ -29,6 +29,10 @@
 	<string>Connect to the Raspberry Pi bridge that sends local Gemma requests to this iPhone.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Record local audio prompts for direct on-device Gemma audio input.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UISupportedInterfaceOrientations</key>

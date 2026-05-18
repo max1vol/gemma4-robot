@@ -74,15 +74,8 @@ APP_PATH="$DERIVED_DATA/Build/Products/${CONFIGURATION}-iphoneos/GemmaPi.app"
 
 build_app() {
   "$APP_DIR/scripts/generate_project.sh"
-  if [ -f "$APP_DIR/Podfile" ]; then
-    (cd "$APP_DIR" && pod install)
-  fi
-  build_container_args=(-project "$APP_DIR/GemmaPi.xcodeproj")
-  if [ -d "$APP_DIR/GemmaPi.xcworkspace" ]; then
-    build_container_args=(-workspace "$APP_DIR/GemmaPi.xcworkspace")
-  fi
   xcodebuild \
-    "${build_container_args[@]}" \
+    -project "$APP_DIR/GemmaPi.xcodeproj" \
     -scheme GemmaPi \
     -configuration "$CONFIGURATION" \
     -destination "platform=iOS,id=$DEVICE_ID" \

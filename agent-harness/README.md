@@ -57,10 +57,15 @@ With that file in place:
 bin/gemma-agent-harness prompt "Hello from the iPhone Gemma worker."
 ```
 
-Run the Voice Kit button agent against the same iPhone Gemma bridge:
+Run the current micro:bit push-to-talk voice agent against the same iPhone
+Gemma bridge:
 
 ```sh
-bin/gemma-agent-harness --env-file ~/gemma4-robot/.env voice-bot \
+bin/gemma-agent-harness \
+  --env-file ~/gemma4-robot/.env \
+  --instructions-file ~/gemma4-robot/agent-harness/prompts/fitness_coach.md \
+  --tool-config ~/gemma4-robot/agent-harness/config/fitness_coach_tools.json \
+  voice-bot \
   --button-source microbit-serial \
   --microbit-device auto \
   --led-source none \
@@ -70,7 +75,8 @@ bin/gemma-agent-harness --env-file ~/gemma4-robot/.env voice-bot \
   --channels 2 \
   --transcription-provider none \
   --tts-provider iphone \
-  --iphone-tts-backend fluid-kokoro-ane
+  --iphone-tts-backend piper-ryan-high \
+  --startup-agent-prompt "Start the robot session. Follow the system instructions."
 ```
 
 The current button source is micro:bit serial. Flash
@@ -80,13 +86,20 @@ The default voice path sends the recorded WAV to the iPhone as raw Gemma audio
 input, not through speech-to-text. The terminal display is updated full-screen
 while text deltas arrive, including audio bytes, audio duration, token estimate,
 and token/sec, so the screen shows the response as it is generated. The current
-Pi audio setup uses the USB webcam
-microphone (`plughw:Camera,0`) at 48 kHz stereo because the camera rejects mono
-ALSA capture requests, and HDMI output (`plughw:vc4hdmi,0`).
+Pi audio setup uses the USB microphone (`plughw:Camera,0`) at 48 kHz stereo
+because that ALSA device rejects mono capture requests, and HDMI output
+(`plughw:vc4hdmi,0`).
 
 iPhone TTS is streamed as raw 24 kHz mono `S16_LE` PCM from the Pi bridge
 `/tts-stream` endpoint and piped directly into `aplay`; it is not base64 and no
 WAV file is written on the Pi for that path.
+
+The fitness-coach prompt and tool config make the first model action
+`wait_for_human`. The vision overlay process updates
+`~/gemma4-robot/kiosk/vision_state.json`; the tools in
+`scripts/agent_tools/vision_tool.py` read that state and coordinate squat
+sessions through `~/gemma4-robot/kiosk/vision_command.json`. The public tool
+names for the model are `wait_for_human` and `squat_counter`.
 
 For Google-hosted Gemma, keep `GEMMA_AGENT_PROVIDER=google` or omit it and set
 `GEMINI_API_KEY`. The default API is `streamGenerateContent` with SSE enabled.

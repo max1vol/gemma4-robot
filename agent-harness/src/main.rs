@@ -39,6 +39,9 @@ struct Cli {
     #[arg(long, env = "GEMMA_AGENT_INSTRUCTIONS")]
     instructions: Option<String>,
 
+    #[arg(long, env = "GEMMA_AGENT_INSTRUCTIONS_FILE")]
+    instructions_file: Option<PathBuf>,
+
     #[arg(long, env = "GEMMA_AGENT_MAX_OUTPUT_TOKENS", default_value_t = 500)]
     max_output_tokens: u32,
 
@@ -134,6 +137,9 @@ struct VoiceBotArgs {
     #[arg(long, default_value = "~/gemma4-robot/kiosk/status.json")]
     status_file: String,
 
+    #[arg(long, default_value = "~/gemma4-robot/kiosk/sensors.json")]
+    sensors_file: String,
+
     #[arg(long, default_value_t = 23)]
     button_gpio: u32,
 
@@ -170,14 +176,11 @@ struct VoiceBotArgs {
     #[arg(long, default_value = "")]
     startup_greeting: String,
 
+    #[arg(long, default_value = "")]
+    startup_agent_prompt: String,
+
     #[arg(long, default_value_t = TranscriptionProvider::None)]
     transcription_provider: TranscriptionProvider,
-
-    #[arg(long, default_value = "gpt-4o-mini-transcribe")]
-    transcription_model: String,
-
-    #[arg(long)]
-    language: Option<String>,
 
     #[arg(long, default_value_t = TtsProvider::Auto)]
     tts_provider: TtsProvider,
@@ -185,22 +188,13 @@ struct VoiceBotArgs {
     #[arg(long)]
     tts_command: Option<String>,
 
-    #[arg(long, default_value = "gpt-4o-mini-tts")]
-    tts_model: String,
-
-    #[arg(long, default_value = "alloy")]
-    tts_voice: String,
-
     #[arg(long, default_value_t = 3900)]
     tts_max_chars: usize,
-
-    #[arg(long)]
-    tts_instructions: Option<String>,
 
     #[arg(long, env = "GEMMA_IOS_TTS_URL")]
     iphone_tts_url: Option<String>,
 
-    #[arg(long, env = "GEMMA_IOS_TTS_BACKEND", default_value = "fluid-kokoro-ane")]
+    #[arg(long, env = "GEMMA_IOS_TTS_BACKEND", default_value = "piper-ryan-high")]
     iphone_tts_backend: String,
 
     #[arg(long, env = "GEMMA_IOS_TTS_VOICE", default_value = "")]
@@ -220,7 +214,6 @@ struct VoiceBotArgs {
 enum TranscriptionProvider {
     Auto,
     None,
-    Openai,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -258,7 +251,6 @@ impl std::fmt::Display for TranscriptionProvider {
         match self {
             TranscriptionProvider::Auto => write!(f, "auto"),
             TranscriptionProvider::None => write!(f, "none"),
-            TranscriptionProvider::Openai => write!(f, "openai"),
         }
     }
 }
@@ -268,7 +260,6 @@ enum TtsProvider {
     Auto,
     None,
     Command,
-    Openai,
     Iphone,
 }
 
@@ -278,7 +269,6 @@ impl std::fmt::Display for TtsProvider {
             TtsProvider::Auto => write!(f, "auto"),
             TtsProvider::None => write!(f, "none"),
             TtsProvider::Command => write!(f, "command"),
-            TtsProvider::Openai => write!(f, "openai"),
             TtsProvider::Iphone => write!(f, "iphone"),
         }
     }
@@ -441,10 +431,12 @@ fn main() -> Result<()> {
     let tools = ToolRegistry::from_path(cli.tool_config.as_deref())?;
     let provider = make_provider(&cli)?;
 
+    let instructions = load_instructions(cli.instructions.clone(), cli.instructions_file.as_deref())?;
+
     let mut agent = Agent {
         provider,
         model: cli.model.clone(),
-        instructions: cli.instructions.clone(),
+        instructions,
         tools,
         max_output_tokens: cli.max_output_tokens,
         max_tool_rounds: cli.max_tool_rounds,
@@ -501,6 +493,22 @@ fn make_provider(cli: &Cli) -> Result<Box<dyn LlmProvider>> {
             require_ready: !cli.ios_bridge_allow_not_ready,
         })),
     }
+}
+
+fn load_instructions(inline: Option<String>, path: Option<&Path>) -> Result<Option<String>> {
+    let file_text = match path {
+        Some(path) => Some(
+            fs::read_to_string(path)
+                .with_context(|| format!("failed to read instructions file {}", path.display()))?,
+        ),
+        None => None,
+    };
+    Ok(match (inline, file_text) {
+        (Some(inline), Some(file_text)) => Some(format!("{}\n\n{}", file_text.trim(), inline.trim())),
+        (Some(inline), None) => Some(inline),
+        (None, Some(file_text)) => Some(file_text),
+        (None, None) => None,
+    })
 }
 
 fn run_prompt(agent: &mut Agent, args: &PromptArgs) -> Result<()> {
@@ -762,6 +770,7 @@ impl LlmProvider for IosBridgeProvider {
         }
 
         let bridge_request = bridge_request(request)?;
+        let use_tool_shim = !request.tools.is_empty();
         let response = if bridge_request.media.is_empty() {
             let body = json!({
                 "model": request.model,
@@ -798,13 +807,45 @@ impl LlmProvider for IosBridgeProvider {
                 bridge_error_message(&value)
             );
         }
-        let text = read_ios_bridge_stream_response(response, on_text_delta)?;
+        let mut streamed_text_to_status = false;
+        let text = if use_tool_shim {
+            let mut buffered_prefix = String::new();
+            let mut decided_text = false;
+            let mut shim_delta = |delta: &str| -> Result<()> {
+                if decided_text {
+                    streamed_text_to_status = true;
+                    return on_text_delta(delta);
+                }
+
+                buffered_prefix.push_str(delta);
+                let trimmed = buffered_prefix.trim_start();
+                if trimmed.is_empty() {
+                    return Ok(());
+                }
+
+                if trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with("```") {
+                    return Ok(());
+                }
+
+                decided_text = true;
+                streamed_text_to_status = true;
+                on_text_delta(&buffered_prefix)
+            };
+            read_ios_bridge_stream_response(response, &mut shim_delta)?
+        } else {
+            read_ios_bridge_stream_response(response, on_text_delta)?
+        };
+        let parts = if use_tool_shim {
+            ios_bridge_parts_from_text(&text, &request.tools, on_text_delta, streamed_text_to_status)?
+        } else {
+            vec![Part::Text {
+                text: text.to_string(),
+            }]
+        };
         Ok(ProviderResponse {
             message: Message {
                 role: "model".to_string(),
-                parts: vec![Part::Text {
-                    text: text.to_string(),
-                }],
+                parts,
             },
         })
     }
@@ -956,7 +997,7 @@ fn function_calls_from_parts(parts: &[Part]) -> Vec<FunctionCall> {
 }
 
 fn text_from_parts(parts: &[Part]) -> String {
-    parts
+    let text = parts
         .iter()
         .filter_map(|part| match part {
             Part::Text { text } => Some(text.as_str()),
@@ -965,7 +1006,16 @@ fn text_from_parts(parts: &[Part]) -> String {
         .collect::<Vec<_>>()
         .join("")
         .trim()
-        .to_string()
+        .to_string();
+    clean_user_text(&text)
+}
+
+fn clean_user_text(text: &str) -> String {
+    let mut cleaned = text.trim_start();
+    while let Some(rest) = cleaned.strip_prefix(':') {
+        cleaned = rest.trim_start();
+    }
+    cleaned.trim().to_string()
 }
 
 fn google_content(message: &Message) -> Value {
@@ -1247,6 +1297,15 @@ fn bridge_request(request: &ProviderRequest) -> Result<IosBridgeRequest> {
     if let Some(instructions) = &request.instructions {
         sections.push(format!("system: {instructions}"));
     }
+    if !request.tools.is_empty() {
+        sections.push(format!(
+            "system: You can request robot tools by responding with one compact JSON object and no Markdown. \
+When you need a tool, respond exactly as {{\"tool_calls\":[{{\"name\":\"tool_name\",\"args\":{{}}}}]}}. \
+When a tool result is already present and no more tool is needed, respond with normal user-facing text. \
+Available tools: {}",
+            ios_bridge_tool_catalog(&request.tools)?
+        ));
+    }
     sections.extend(request.messages.iter().map(message_to_prompt_text));
     sections.push("assistant:".to_string());
     sections.insert(0, "system: Do not use emojis.".to_string());
@@ -1284,6 +1343,130 @@ fn bridge_request(request: &ProviderRequest) -> Result<IosBridgeRequest> {
     Ok(IosBridgeRequest {
         prompt: sections.join("\n\n"),
         media,
+    })
+}
+
+fn ios_bridge_tool_catalog(tools: &[ToolDefinition]) -> Result<String> {
+    let value = tools
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&value).context("failed to serialize iOS bridge tool catalog")
+}
+
+fn ios_bridge_parts_from_text(
+    text: &str,
+    tools: &[ToolDefinition],
+    on_text_delta: &mut dyn FnMut(&str) -> Result<()>,
+    already_streamed: bool,
+) -> Result<Vec<Part>> {
+    let trimmed = strip_json_markdown(text.trim());
+    if let Some(calls) = parse_ios_bridge_tool_calls(trimmed, tools) {
+        return Ok(calls
+            .into_iter()
+            .map(|call| Part::FunctionCall {
+                name: call.name,
+                args: call.args,
+                thought_signature: None,
+            })
+            .collect());
+    }
+    if !text.is_empty() && !already_streamed {
+        on_text_delta(text)?;
+    }
+    Ok(vec![Part::Text {
+        text: text.to_string(),
+    }])
+}
+
+fn strip_json_markdown(text: &str) -> &str {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("```json") {
+        return rest.trim().trim_end_matches("```").trim();
+    }
+    if let Some(rest) = trimmed.strip_prefix("```") {
+        return rest.trim().trim_end_matches("```").trim();
+    }
+    trimmed
+}
+
+fn parse_ios_bridge_tool_calls(text: &str, tools: &[ToolDefinition]) -> Option<Vec<FunctionCall>> {
+    let allowed = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+
+    let value: Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(_) => return parse_truncated_ios_bridge_tool_call(text, &allowed),
+    };
+
+    let calls_value = value
+        .get("tool_calls")
+        .or_else(|| value.get("function_calls"))
+        .or_else(|| value.get("calls"));
+    if let Some(calls) = calls_value.and_then(Value::as_array) {
+        let parsed = calls
+            .iter()
+            .filter_map(|call| parse_ios_bridge_tool_call(call, &allowed))
+            .collect::<Vec<_>>();
+        return (!parsed.is_empty()).then_some(parsed);
+    }
+
+    if let Some(call) = value
+        .get("tool_call")
+        .or_else(|| value.get("function_call"))
+    {
+        return parse_ios_bridge_tool_call(call, &allowed).map(|call| vec![call]);
+    }
+
+    parse_ios_bridge_tool_call(&value, &allowed).map(|call| vec![call])
+}
+
+fn parse_truncated_ios_bridge_tool_call(text: &str, allowed: &[&str]) -> Option<Vec<FunctionCall>> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('{')
+        && !trimmed.starts_with('[')
+        && !trimmed.contains("tool_call")
+        && !trimmed.contains("function_call")
+    {
+        return None;
+    }
+
+    for name in allowed {
+        if trimmed.contains(&format!("\"{name}\"")) || trimmed.contains(&format!("'{name}'")) {
+            return Some(vec![FunctionCall {
+                name: (*name).to_string(),
+                args: json!({}),
+            }]);
+        }
+    }
+    None
+}
+
+fn parse_ios_bridge_tool_call(value: &Value, allowed: &[&str]) -> Option<FunctionCall> {
+    let name = value
+        .get("name")
+        .or_else(|| value.get("tool"))
+        .or_else(|| value.get("function"))
+        .and_then(Value::as_str)?;
+    if !allowed.iter().any(|allowed_name| *allowed_name == name) {
+        return None;
+    }
+    let args = value
+        .get("args")
+        .or_else(|| value.get("arguments"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    Some(FunctionCall {
+        name: name.to_string(),
+        args,
     })
 }
 
@@ -1483,6 +1666,94 @@ fn run_voice_bot(agent: &mut Agent, args: &VoiceBotArgs) -> Result<()> {
     let mut previous_pressed = false;
     let mut turn = 0usize;
 
+    if !args.startup_agent_prompt.trim().is_empty() {
+        loop {
+            turn += 1;
+            status.write_turn(
+                turn,
+                "waiting",
+                "wait_for_human",
+                "Waiting for a human in the camera view",
+                "",
+            )?;
+            let human_result = agent.tools.call(&FunctionCall {
+                name: "wait_for_human".to_string(),
+                args: json!({
+                    "stable_seconds": 0.2,
+                    "timeout_seconds": 5.0,
+                }),
+            })?;
+            if !human_result
+                .get("human_detected")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                eprintln!(
+                    "startup human detection did not become stable; greeting anyway: {}",
+                    serde_json::to_string(&human_result).unwrap_or_else(|_| "{}".to_string())
+                );
+            }
+
+            let startup_prompt = format!(
+                "The startup vision gate returned this sensor result: {}. \
+Greet the user now in one short spoken sentence, even if pose detection is not stable yet. \
+Do not call tools and do not output JSON.",
+                serde_json::to_string(&human_result).unwrap_or_else(|_| "{}".to_string())
+            );
+            let message_checkpoint = agent.messages.clone();
+            match process_text_turn_without_tools(agent, &mut status, turn, &startup_prompt) {
+                Ok(turn_run) => {
+                    status.write_turn_stats(
+                        turn,
+                        "playing",
+                        &startup_prompt,
+                        &turn_run.run.text,
+                        "",
+                        Some(&turn_run.stats),
+                    )?;
+                    if let Err(error) = speak_response(args, &speech_dir, &turn_run.run.text, turn) {
+                        status.write_turn_stats(
+                            turn,
+                            "error",
+                            &startup_prompt,
+                            &turn_run.run.text,
+                            &error.to_string(),
+                            Some(&turn_run.stats),
+                        )?;
+                        eprintln!("startup TTS failed: {error:?}");
+                    } else {
+                        status.write_turn_stats(
+                            turn,
+                            "idle",
+                            &startup_prompt,
+                            &turn_run.run.text,
+                            "",
+                            Some(&turn_run.stats),
+                        )?;
+                    }
+                    break;
+                }
+                Err(error) => {
+                    agent.messages = message_checkpoint;
+                    eprintln!("startup agent turn failed: {error:?}");
+                    if is_transient_startup_error(&error) {
+                        status.write_turn(
+                            turn,
+                            "waiting",
+                            "Waiting for iPhone",
+                            "Waiting for iPhone Gemma runtime at ws://pi3:8765/worker",
+                            "",
+                        )?;
+                        thread::sleep(Duration::from_secs(15));
+                        continue;
+                    }
+                    status.write_turn(turn, "error", &startup_prompt, "", &error.to_string())?;
+                    break;
+                }
+            }
+        }
+    }
+
     loop {
         let pressed = controls.button_pressed()?;
         if pressed && !previous_pressed {
@@ -1664,19 +1935,81 @@ fn process_audio_turn(
     Ok(VoiceTurnRun { run, stats })
 }
 
+fn is_transient_startup_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("no connected iPhone worker")
+        || text.contains("Gemma runtime is not ready")
+        || text.contains("iOS bridge stream error")
+        || text.contains("iOS bridge stream ended")
+        || text.contains("failed to check iOS bridge health")
+        || text.contains("Connection refused")
+        || text.contains("connection refused")
+}
+
+fn process_text_turn_without_tools(
+    agent: &mut Agent,
+    status: &mut VoiceStatus,
+    turn: usize,
+    input: &str,
+) -> Result<VoiceTurnRun> {
+    let started = Instant::now();
+    let mut stats = VoiceTurnStats {
+        audio_bytes: 0,
+        audio_seconds: 0.0,
+        output_tokens_estimate: 0,
+        elapsed_seconds: 0.0,
+        tokens_per_second: 0.0,
+    };
+    status.write_turn_stats(turn, "thinking", input, "", "", Some(&stats))?;
+    agent.messages.push(Message {
+        role: "user".to_string(),
+        parts: vec![Part::Text {
+            text: input.to_string(),
+        }],
+    });
+
+    let mut output = String::new();
+    let mut stream = |delta: &str| -> Result<()> {
+        output.push_str(delta);
+        stats.output_tokens_estimate = estimate_tokens(&output);
+        stats.elapsed_seconds = started.elapsed().as_secs_f64();
+        stats.tokens_per_second = if stats.elapsed_seconds > 0.0 {
+            stats.output_tokens_estimate as f64 / stats.elapsed_seconds
+        } else {
+            0.0
+        };
+        status.write_turn_stats(turn, "receiving", input, &output, "", Some(&stats))?;
+        Ok(())
+    };
+    let request = ProviderRequest {
+        model: agent.model.clone(),
+        instructions: agent.instructions.clone(),
+        messages: agent.messages.clone(),
+        tools: Vec::new(),
+        max_output_tokens: agent.max_output_tokens,
+    };
+    let response = agent.provider.generate(&request, &mut stream)?;
+    let text = text_from_parts(&response.message.parts);
+    agent.messages.push(response.message);
+    stats.output_tokens_estimate = estimate_tokens(&text);
+    stats.elapsed_seconds = started.elapsed().as_secs_f64();
+    stats.tokens_per_second = if stats.elapsed_seconds > 0.0 {
+        stats.output_tokens_estimate as f64 / stats.elapsed_seconds
+    } else {
+        0.0
+    };
+    Ok(VoiceTurnRun {
+        run: AgentRun {
+            text,
+            messages: agent.messages.clone(),
+            tool_calls: Vec::new(),
+        },
+        stats,
+    })
+}
+
 fn voice_input_parts(args: &VoiceBotArgs, path: &Path) -> Result<(String, Vec<Part>)> {
     match effective_transcription_provider(args)? {
-        TranscriptionProvider::Openai => {
-            let transcript = openai_transcribe(args, path)?;
-            if transcript.trim().is_empty() {
-                bail!("speech transcription returned an empty transcript");
-            }
-            let prompt = format!("{}\n\nUser said: {}", args.audio_prompt, transcript.trim());
-            Ok((
-                transcript.trim().to_string(),
-                vec![Part::Text { text: prompt }],
-            ))
-        }
         TranscriptionProvider::None => {
             let bytes = fs::metadata(path)
                 .with_context(|| format!("failed to stat {}", path.display()))?
@@ -1703,46 +2036,9 @@ fn estimate_tokens(text: &str) -> usize {
 
 fn effective_transcription_provider(args: &VoiceBotArgs) -> Result<TranscriptionProvider> {
     match args.transcription_provider {
-        TranscriptionProvider::Auto => {
-            if std::env::var_os("OPENAI_API_KEY").is_some() {
-                Ok(TranscriptionProvider::Openai)
-            } else {
-                Ok(TranscriptionProvider::None)
-            }
-        }
+        TranscriptionProvider::Auto => Ok(TranscriptionProvider::None),
         other => Ok(other),
     }
-}
-
-fn openai_transcribe(args: &VoiceBotArgs, path: &Path) -> Result<String> {
-    let api_key = openai_api_key()?;
-    let mut fields = vec![
-        ("model".to_string(), args.transcription_model.clone()),
-        ("response_format".to_string(), "text".to_string()),
-    ];
-    if let Some(language) = &args.language {
-        fields.push(("language".to_string(), language.clone()));
-    }
-    let (body, content_type) = multipart_audio_body(&fields, "file", path)?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .context("failed to create OpenAI transcription HTTP client")?;
-    let response = client
-        .post("https://api.openai.com/v1/audio/transcriptions")
-        .bearer_auth(api_key)
-        .header("Content-Type", content_type)
-        .body(body)
-        .send()
-        .context("OpenAI transcription request failed")?;
-    let status = response.status();
-    let text = response
-        .text()
-        .context("failed reading OpenAI transcription response")?;
-    if !status.is_success() {
-        bail!("OpenAI transcription error {status}: {text}");
-    }
-    Ok(text.trim().to_string())
 }
 
 fn speak_response(args: &VoiceBotArgs, speech_dir: &Path, text: &str, turn: usize) -> Result<()> {
@@ -1774,7 +2070,6 @@ fn speak_response(args: &VoiceBotArgs, speech_dir: &Path, text: &str, turn: usiz
 fn synthesize_speech(args: &VoiceBotArgs, text: &str, output: &Path) -> Result<()> {
     match effective_tts_provider(args)? {
         TtsProvider::None => Ok(()),
-        TtsProvider::Openai => openai_tts(args, text, output),
         TtsProvider::Command => command_tts(args, text, output),
         TtsProvider::Iphone => bail!("iPhone TTS streams directly to playback and does not synthesize a WAV file"),
         TtsProvider::Auto => unreachable!("effective_tts_provider resolves auto"),
@@ -1788,13 +2083,11 @@ fn effective_tts_provider(args: &VoiceBotArgs) -> Result<TtsProvider> {
                 Ok(TtsProvider::Command)
             } else if args.iphone_tts_url.is_some() || std::env::var_os("GEMMA_IOS_TTS_URL").is_some() {
                 Ok(TtsProvider::Iphone)
-            } else if std::env::var_os("OPENAI_API_KEY").is_some() {
-                Ok(TtsProvider::Openai)
             } else if command_exists("espeak-ng") || command_exists("espeak") {
                 Ok(TtsProvider::Command)
             } else {
                 bail!(
-                    "no TTS provider configured; set OPENAI_API_KEY, install espeak-ng, or pass --tts-command"
+                    "no TTS provider configured; set GEMMA_IOS_TTS_URL, install espeak-ng, or pass --tts-command"
                 );
             }
         }
@@ -1875,39 +2168,6 @@ fn iphone_tts_play(args: &VoiceBotArgs, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn openai_tts(args: &VoiceBotArgs, text: &str, output: &Path) -> Result<()> {
-    let api_key = openai_api_key()?;
-    let mut payload = json!({
-        "model": args.tts_model,
-        "voice": args.tts_voice,
-        "input": text,
-        "response_format": "wav",
-    });
-    if let Some(instructions) = &args.tts_instructions {
-        payload["instructions"] = json!(instructions);
-    }
-    let client = Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()
-        .context("failed to create OpenAI TTS HTTP client")?;
-    let response = client
-        .post("https://api.openai.com/v1/audio/speech")
-        .bearer_auth(api_key)
-        .json(&payload)
-        .send()
-        .context("OpenAI TTS request failed")?;
-    let status = response.status();
-    if !status.is_success() {
-        let text = response.text().unwrap_or_else(|_| String::new());
-        bail!("OpenAI TTS error {status}: {text}");
-    }
-    let bytes = response
-        .bytes()
-        .context("failed reading OpenAI TTS audio")?;
-    fs::write(output, bytes).with_context(|| format!("failed to write {}", output.display()))?;
-    Ok(())
-}
-
 fn command_tts(args: &VoiceBotArgs, text: &str, output: &Path) -> Result<()> {
     if let Some(template) = &args.tts_command {
         let command = template
@@ -1951,50 +2211,6 @@ fn play_wav(path: &Path, playback_device: &str) -> Result<()> {
         bail!("aplay exited with {status}");
     }
     Ok(())
-}
-
-fn openai_api_key() -> Result<String> {
-    std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is not set")
-}
-
-fn multipart_audio_body(
-    fields: &[(String, String)],
-    file_field: &str,
-    file_path: &Path,
-) -> Result<(Vec<u8>, String)> {
-    let boundary = format!(
-        "----gemma4robot{}",
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-    );
-    let mut body = Vec::new();
-    for (name, value) in fields {
-        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-        body.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
-        );
-        body.extend_from_slice(value.as_bytes());
-        body.extend_from_slice(b"\r\n");
-    }
-
-    let file_name = file_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("audio.wav");
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(
-        format!(
-            "Content-Disposition: form-data; name=\"{file_field}\"; filename=\"{file_name}\"\r\n"
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
-    body.extend_from_slice(
-        &fs::read(file_path).with_context(|| format!("failed to read {}", file_path.display()))?,
-    );
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-
-    Ok((body, format!("multipart/form-data; boundary={boundary}")))
 }
 
 fn split_for_tts(text: &str, max_chars: usize) -> Vec<String> {
@@ -2195,10 +2411,15 @@ struct VoiceControls {
 
 impl VoiceControls {
     fn new(args: &VoiceBotArgs) -> Result<Self> {
+        let sensors_file = expand_tilde(&args.sensors_file);
         let button = match args.button_source {
             ButtonSource::Gpio => VoiceButton::Gpio(GpioButton::new(args.button_gpio)?),
             ButtonSource::MicrobitSerial => VoiceButton::MicrobitSerial(
-                MicrobitSerialButton::new(args.microbit_device.clone(), args.microbit_baud),
+                MicrobitSerialButton::new(
+                    args.microbit_device.clone(),
+                    args.microbit_baud,
+                    sensors_file,
+                ),
             ),
         };
         let led = match args.led_source {
@@ -2307,7 +2528,7 @@ struct MicrobitSerialButton {
 }
 
 impl MicrobitSerialButton {
-    fn new(device: String, baud: u32) -> Self {
+    fn new(device: String, baud: u32, sensors_file: PathBuf) -> Self {
         let pressed = Arc::new(AtomicBool::new(false));
         let worker_pressed = pressed.clone();
         thread::spawn(move || loop {
@@ -2339,6 +2560,14 @@ impl MicrobitSerialButton {
                     Ok(_) => {
                         if let Some(is_pressed) = parse_microbit_button_line(&line) {
                             worker_pressed.store(is_pressed, Ordering::SeqCst);
+                        }
+                        if let Some(sensor_payload) = parse_microbit_sensor_line(&line) {
+                            if let Err(error) = write_json_atomic(&sensors_file, &sensor_payload) {
+                                eprintln!(
+                                    "failed to write sensor state {}: {error:#}",
+                                    sensors_file.display()
+                                );
+                            }
                         }
                     }
                     Err(error) => {
@@ -2461,6 +2690,58 @@ fn parse_microbit_button_line(line: &str) -> Option<bool> {
         return Some(false);
     }
     None
+}
+
+fn parse_microbit_sensor_line(line: &str) -> Option<Value> {
+    let trimmed = line.trim();
+    if !trimmed.contains("co2_raw=") && !trimmed.contains("co2_value=") {
+        return None;
+    }
+
+    let fields = parse_microbit_key_value_line(trimmed);
+    let co2_raw = fields
+        .get("co2_raw")
+        .and_then(|value| value.parse::<i64>().ok());
+    let co2_value = fields
+        .get("co2_value")
+        .and_then(|value| value.parse::<i64>().ok());
+    if co2_raw.is_none() && co2_value.is_none() {
+        return None;
+    }
+
+    Some(json!({
+        "source": "microbit",
+        "sample": fields.get("sample").and_then(|value| value.parse::<u64>().ok()),
+        "co2_raw": co2_raw,
+        "co2_value": co2_value,
+        "updated_at": chrono::Utc::now().to_rfc3339(),
+        "updated_at_unix": chrono::Utc::now().timestamp(),
+        "line": trimmed,
+    }))
+}
+
+fn parse_microbit_key_value_line(line: &str) -> HashMap<String, String> {
+    let mut fields = HashMap::new();
+    for token in line.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        fields.insert(key.to_ascii_lowercase(), value.to_string());
+    }
+    fields
+}
+
+fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(value)? + "\n")
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("failed to rename {} to {}", tmp.display(), path.display()))?;
+    Ok(())
 }
 
 fn export_gpio(pin: u32, direction: &str) -> Result<u32> {

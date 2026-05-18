@@ -2,6 +2,20 @@ serial.redirectToUSB()
 basic.showString("R")
 
 let sample = 0
+let buttonAPressed = input.buttonIsPressed(Button.A)
+
+serial.writeLine(buttonAPressed ? "A:down" : "A:up")
+control.inBackground(function () {
+    while (true) {
+        const pressed = input.buttonIsPressed(Button.A)
+        if (pressed != buttonAPressed) {
+            buttonAPressed = pressed
+            serial.writeLine(pressed ? "A:down" : "A:up")
+            basic.showIcon(pressed ? IconNames.Yes : IconNames.SmallDiamond)
+        }
+        basic.pause(20)
+    }
+})
 
 //% shim=dstemp::celsius
 function ds18b20C(pin: DigitalPin): number {

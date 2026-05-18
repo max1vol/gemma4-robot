@@ -1,0 +1,45 @@
+{
+  "tools": [
+    {
+      "name": "wait_for_human",
+      "description": "Block until the vision system sees a stable human pose in the camera view.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "stable_seconds": {
+            "type": "number",
+            "description": "How long the human must remain visible before returning."
+          },
+          "timeout_seconds": {
+            "type": "number",
+            "description": "Maximum time to wait before returning a timeout."
+          }
+        }
+      },
+      "command": ["python3", "scripts/agent_tools/vision_tool.py", "wait_for_human"]
+    },
+    {
+      "name": "squat_counter",
+      "description": "Start or continue squat counting from pose estimation. Returns at squat counts 2 and 4, and ends the set at 4.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target_reps": {
+            "type": "integer",
+            "description": "Total squats to count before ending the set. Default is 4."
+          },
+          "milestones": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": "Rep counts where the tool should return to Gemma. Default is [2, 4]."
+          },
+          "reset": {
+            "type": "boolean",
+            "description": "Start a new squat session even if one is already active."
+          }
+        }
+      },
+      "command": ["python3", "scripts/agent_tools/vision_tool.py", "squat_counter"]
+    }
+  ]
+}

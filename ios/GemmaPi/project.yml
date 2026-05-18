@@ -13,9 +13,11 @@ packages:
   LiteRTLM-Swift:
     url: https://github.com/mylovelycodes/LiteRTLM-Swift.git
     branch: main
-  FluidAudio:
-    url: https://github.com/FluidInference/FluidAudio.git
-    branch: main
+  SWCompression:
+    url: https://github.com/tsolomko/SWCompression.git
+    exactVersion: 4.8.6
+  LocalMediaPipeTasks:
+    path: LocalMediaPipe
 targets:
   GemmaPi:
     type: application
@@ -25,11 +27,17 @@ targets:
     dependencies:
       - package: LiteRTLM-Swift
         product: LiteRTLMSwift
-      - package: FluidAudio
-        product: FluidAudio
+      - package: SWCompression
+        product: SWCompression
+      - package: LocalMediaPipeTasks
+        product: MediaPipeTasksCommon
+      - package: LocalMediaPipeTasks
+        product: MediaPipeTasksVision
       - framework: LocalLlama/llama.framework
         embed: true
         codeSign: true
+      - framework: LocalSherpaOnnx/sherpa-onnx.xcframework
+      - framework: LocalSherpaOnnx/onnxruntime.xcframework
     info:
       path: GemmaPiApp/Info.plist
       properties:
@@ -52,6 +60,12 @@ targets:
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: GemmaPi.entitlements
         ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+        FRAMEWORK_SEARCH_PATHS: $(inherited) LocalLlama LocalSherpaOnnx
+        HEADER_SEARCH_PATHS: $(inherited) "$(SRCROOT)/LocalSherpaOnnx/include"
+        SWIFT_OBJC_BRIDGING_HEADER: GemmaPiApp/SherpaOnnxBridge.h
+        OTHER_LDFLAGS: $(inherited) -ObjC -lc++ -framework AVFoundation -framework Accelerate -framework AssetsLibrary -framework CoreFoundation -framework CoreGraphics -framework CoreImage -framework CoreMedia -framework CoreVideo -framework QuartzCore
+        OTHER_LDFLAGS[sdk=iphoneos*]: $(inherited) -force_load "$(SRCROOT)/LocalMediaPipe/Artifacts/MediaPipeTasksCommonGraph/libMediaPipeTasksCommon_device_graph.a"
+        OTHER_LDFLAGS[sdk=iphonesimulator*]: $(inherited) -force_load "$(SRCROOT)/LocalMediaPipe/Artifacts/MediaPipeTasksCommonGraph/libMediaPipeTasksCommon_simulator_graph.a"
     postBuildScripts:
       - name: Embed LiteRT-LM dylibs
         basedOnDependencyAnalysis: false

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct GemmaPiApp: App {
@@ -10,6 +11,10 @@ struct GemmaPiApp: App {
       ContentView()
         .environmentObject(modelStore)
         .environmentObject(bridge)
+        .onAppear {
+          UIApplication.shared.isIdleTimerDisabled = true
+          AppLog.info("Idle timer disabled while Gemma Inference Server is foregrounded")
+        }
     }
   }
 }

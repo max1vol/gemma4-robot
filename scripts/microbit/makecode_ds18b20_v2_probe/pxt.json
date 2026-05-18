@@ -1,0 +1,15 @@
+{
+  "name": "ds18b20-v2-probe",
+  "version": "0.0.1",
+  "description": "Read PlanetX CO2 and probe DS18B20 on Nezha digital pins with the V2-only driver.",
+  "dependencies": {
+    "core": "*",
+    "microphone": "*",
+    "pxt-PlanetX": "github:elecfreaks/pxt-PlanetX#v1.6.3",
+    "pxt-18b20-v2only": "github:lionyhw/pxt-18b20-v2only"
+  },
+  "files": [
+    "main.ts"
+  ],
+  "preferredEditor": "tsprj"
+}

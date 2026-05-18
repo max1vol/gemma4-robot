@@ -49,17 +49,25 @@ class BridgeState:
 
     async def set_worker(self, worker: "WebSocketPeer | None") -> None:
         stale_worker: WebSocketPeer | None = None
+        pending_to_fail: list[PendingJob] = []
         async with self.lock:
             if self.worker and self.worker is not worker:
                 stale_worker = self.worker
             self.worker = worker
             if worker is None:
                 self.worker_status = {}
+            if stale_worker is not None or worker is None:
+                pending_to_fail = list(self.pending.values())
         if stale_worker is not None:
             try:
                 await stale_worker.close()
             except Exception:
                 pass
+        for job in pending_to_fail:
+            await job.queue.put({
+                "type": "error",
+                "message": "iPhone worker disconnected",
+            })
 
     async def send_to_worker_json(self, worker: "WebSocketPeer", payload: dict[str, Any]) -> None:
         try:
@@ -465,7 +473,7 @@ async def handle_connection(
         if method == "POST" and route == "/tts-stream":
             payload = json.loads(body.decode("utf-8") or "{}")
             text = str(payload.get("text", ""))
-            backend = str(payload.get("tts_backend") or payload.get("backend") or "fluid-kokoro-ane")
+            backend = str(payload.get("tts_backend") or payload.get("backend") or "piper-ryan-high")
             voice = str(payload.get("voice") or "")
             timeout = float(payload.get("timeout", 120))
             await send_http_binary_stream(
@@ -683,9 +691,13 @@ def unpack_worker_binary(payload: bytes) -> dict[str, Any]:
 
 async def send_http_json(writer: asyncio.StreamWriter, status: int, payload: dict[str, Any]) -> None:
     body = json.dumps(payload, indent=2).encode("utf-8")
-    reason = {200: "OK", 400: "Bad Request", 404: "Not Found", 500: "Internal Server Error"}.get(
-        status, "OK"
-    )
+    reason = {
+        200: "OK",
+        400: "Bad Request",
+        404: "Not Found",
+        500: "Internal Server Error",
+        502: "Bad Gateway",
+    }.get(status, "OK")
     writer.write(
         (
             f"HTTP/1.1 {status} {reason}\r\n"
@@ -768,26 +780,46 @@ async def send_http_binary_stream(
     chunks: AsyncIterator[bytes],
     headers: dict[str, str],
 ) -> None:
-    header_lines = [
-        "HTTP/1.1 200 OK",
-        "Transfer-Encoding: chunked",
-        "Cache-Control: no-store",
-        "Connection: close",
-    ]
-    header_lines.extend(f"{name}: {value}" for name, value in headers.items())
-    writer.write(("\r\n".join(header_lines) + "\r\n\r\n").encode("ascii"))
-    try:
+    header_sent = False
+    response_closed = False
+
+    async def send_headers() -> None:
+        nonlocal header_sent
+        if header_sent:
+            return
+        header_lines = [
+            "HTTP/1.1 200 OK",
+            "Transfer-Encoding: chunked",
+            "Cache-Control: no-store",
+            "Connection: close",
+        ]
+        header_lines.extend(f"{name}: {value}" for name, value in headers.items())
+        writer.write(("\r\n".join(header_lines) + "\r\n\r\n").encode("ascii"))
         await writer.drain()
+        header_sent = True
+
+    try:
         async for chunk in chunks:
             if chunk:
+                await send_headers()
                 await send_http_chunk(writer, chunk)
     except Exception as exc:  # noqa: BLE001 - stream errors must reach the caller if possible.
-        try:
-            await send_http_chunk(writer, f"\nERROR: {exc}\n".encode("utf-8"))
-        except ConnectionResetError:
-            pass
+        print(f"binary stream failed: {exc}", file=sys.stderr, flush=True)
+        if not header_sent:
+            await send_http_json(writer, 502, {"error": str(exc)})
+            response_closed = True
+            return
+        # A chunked binary response cannot change HTTP status after audio bytes have
+        # already been sent. Close the stream without appending text into raw PCM.
+        return
     finally:
-        await finish_http_chunks(writer)
+        if response_closed:
+            return
+        if header_sent:
+            await finish_http_chunks(writer)
+        else:
+            await send_headers()
+            await finish_http_chunks(writer)
 
 
 async def serve(args: argparse.Namespace) -> None:

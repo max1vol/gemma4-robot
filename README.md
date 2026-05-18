@@ -13,6 +13,18 @@ talks to it through a microphone, shows work and movement through cameras, and
 gets responses through the screen, audio, and marks written by the plotter. A
 single physical button can be used for simple control.
 
+## Project Photos
+
+Raspberry Pi controller, iPhone Gemma worker, HDMI kiosk, LEGO hub, micro:bit,
+and local wiring:
+
+![Raspberry Pi controller and kiosk setup](docs/media/pi-controller-kiosk.jpg)
+
+LEGO paper plotter prototype for writing tasks and feedback directly onto
+student work:
+
+![LEGO plotter paper feedback prototype](docs/media/lego-plotter-paper-loop.jpg)
+
 This repository is an entry for the [Gemma 4 Good Hackathon](https://www.kaggle.com/competitions/gemma-4-good-hackathon).
 Gemma 4 is the central brain of the system: it drives the assistant, turns
 learning goals into tasks, reads student work from camera images, grades
@@ -23,16 +35,16 @@ the physical-activity coach.
 
 The Raspberry Pi 3 remains the hardware controller and kiosk, while the iPhone
 does the heavy inference work. The Pi starts the local services at boot, opens a
-bridge listener, records from the USB webcam microphone, updates the HDMI kiosk,
+bridge listener, records from the USB microphone, updates the HDMI kiosk,
 and plays audio through HDMI. The iPhone app connects out to the Pi bridge,
 loads Gemma 4 E2B with `llama.cpp` on Metal GPU, runs MediaPipe pose
-estimation, and streams Kokoro TTS audio back to the Pi.
+estimation, and streams Piper TTS audio back to the Pi.
 
 ```mermaid
 flowchart LR
   subgraph Pi["Raspberry Pi 3"]
     Button["micro:bit A button over USB serial"]
-    Mic["USB webcam microphone"]
+    Mic["USB microphone"]
     Kiosk["HDMI kiosk display"]
     Speaker["HDMI audio output"]
     Harness["Rust agent harness"]
@@ -42,7 +54,7 @@ flowchart LR
   subgraph Phone["iPhone app"]
     Gemma["Gemma 4 E2B + mtmd via llama.cpp Metal GPU"]
     Pose["MediaPipe pose landmarker"]
-    TTS["Kokoro 82M via FluidAudio CoreML"]
+    TTS["Piper Ryan High via sherpa-onnx"]
   end
 
   Button --> Harness
@@ -61,12 +73,27 @@ flowchart LR
 The Pi side is split into three long-running pieces:
 
 - `gemma-voice-bot.service`: starts the Rust voice agent automatically at boot.
-- `gemma-voice-kiosk.service`: starts the HDMI kiosk automatically at boot.
+- `gemma-voice-kiosk.service`: starts the HDMI camera overlay automatically at boot.
 - `iphone_llm_bridge.py`: starts from the `max` user's `@reboot` crontab and
   listens on `0.0.0.0:8765`.
 
 The iPhone app cannot be auto-launched by the Pi after an iPhone reboot or app
 kill. It must be running so it can connect back to the Pi bridge.
+
+## Vision And Coaching Loop
+
+The HDMI display is a direct framebuffer overlay, not Chrome or X. The kiosk
+launcher runs `scripts/vision/pi_camera_pose_overlay.py`, which reads only the
+CSI Pi camera through `rpicam-vid`, draws the live camera feed to `/dev/fb0`,
+sends lower-rate RGB pose frames to the iPhone bridge, and draws returned
+MediaPipe landmarks, Gemma text, pose FPS, and squat counts on top.
+
+The Rust harness is configured with `agent-harness/prompts/fitness_coach.md` and
+`agent-harness/config/fitness_coach_tools.json`. At startup it prompts Gemma to
+call `wait_for_human`; that tool blocks on `~/gemma4-robot/kiosk/vision_state.json`
+until a stable pose is visible. If the user asks for exercise coaching, Gemma
+calls `squat_counter`, which writes `vision_command.json` and returns at the 2
+and 4 rep milestones in the current home-demo configuration.
 
 ## Voice Loop
 
@@ -84,7 +111,7 @@ sequenceDiagram
 
   User->>Microbit: Hold A
   Microbit->>Pi: A:down over USB serial
-  Pi->>Pi: Start arecord from USB webcam mic
+  Pi->>Pi: Start arecord from USB mic
   Pi->>HDMI: Show recording state
   User->>Microbit: Release A
   Microbit->>Pi: A:up over USB serial
@@ -112,6 +139,18 @@ The iPhone app is under [`ios/GemmaPi/`](ios/GemmaPi/). Its source of truth is
 [`ios/GemmaPi/project.yml`](ios/GemmaPi/project.yml) plus Swift files under
 `ios/GemmaPi/GemmaPiApp/`; generated Xcode files are not committed.
 
+Open the app in Xcode with:
+
+```sh
+ios/GemmaPi/scripts/open_xcode.sh
+```
+
+That script downloads the ignored local MediaPipe XCFramework artifacts,
+regenerates `GemmaPi.xcodeproj`, and opens it in Xcode. MediaPipe pose
+estimation is wired through a local SwiftPM binary package under
+`ios/GemmaPi/LocalMediaPipe/`; the large Google artifacts are downloaded by
+script and are not committed.
+
 The app screen exposes:
 
 - model download and delete controls,
@@ -120,14 +159,41 @@ The app screen exposes:
 - Pi bridge connect and cancel controls,
 - a model test prompt,
 - a TTS model picker and voice field,
-- a speaker button to play the last model-test response through iPhone Kokoro
-  TTS,
+- a speaker button to play the last model-test response through iPhone
+  Piper TTS,
 - a hold-to-talk mic button that records a WAV on the iPhone and sends it to
   Gemma as an audio input,
 - connection, token, pose, TTS, prompt, and generated-text stats.
 
 CPU/GPU benchmark controls and llama benchmark code have been removed from the
 app. The serving path is the proven `llama.cpp` Metal GPU path.
+
+## Gemma4 Omni Fitness Model
+
+This repo also includes `gemma4-omni-fitness/`, the audio-output training area
+for a small Gemma4 omni fitness coach. The work trains Gemma-conditioned
+audio-output heads that emit speech codec tokens, then decodes those tokens into
+spoken coaching audio. The training and smoke experiments ran on Modal: the
+larger audio-conditioned runs used H100 GPUs, while smaller codec,
+projection-head, and packaging checks used L4 GPUs where that was enough.
+
+The current trained omni model is a research prototype, not the deployed robot
+voice path. It proves the Gemma-to-audio plumbing for narrow fitness-coaching
+phrases and style controls, and the docs record where the current approach does
+and does not generalize.
+
+`gemma4-omni-fitness/dataset-browser/` is a local SvelteKit dataset browsing UI.
+It loads dataset manifests from ignored `out/` directories, lets us filter by
+split, transcript, style, voice, loudness, and review status, and streams sample
+WAV files through a local `/audio` route for manual quality review.
+
+Run it locally with:
+
+```sh
+cd gemma4-omni-fitness/dataset-browser
+npm install
+GEMMA4_OMNI_REPO_ROOT=/Users/yaroslavvolovich/projects/gemma4-robot npm run dev
+```
 
 ## Pi Button Setup
 
@@ -208,6 +274,8 @@ The core ideas are:
 - camera-based grading,
 - pen-plotter feedback directly on paper,
 - Gemma 4 as the central learning coach and hardware-control brain,
+- trained Gemma4 omni audio-model research for future low-latency coaching
+  speech,
 - microphone and camera input with screen, audio, and plotter output,
 - local camera-based exercise counting.
 

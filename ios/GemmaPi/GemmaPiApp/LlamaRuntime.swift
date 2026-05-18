@@ -128,8 +128,8 @@ import Foundation
             let nThreads = max(1, min(8, ProcessInfo.processInfo.processorCount - 2))
             var contextParams = llama_context_default_params()
             contextParams.n_ctx = contextSize
-            contextParams.n_batch = 512
-            contextParams.n_ubatch = 512
+            contextParams.n_batch = contextSize
+            contextParams.n_ubatch = min(contextSize, UInt32(512))
             contextParams.n_seq_max = 2
             contextParams.n_threads = Int32(nThreads)
             contextParams.n_threads_batch = Int32(nThreads)
@@ -286,7 +286,7 @@ import Foundation
         let pieceBytes = tokenToPiece(nextToken)
         if !pieceBytes.isEmpty {
           partialUTF8.append(contentsOf: pieceBytes)
-          if let text = String(validatingUTF8: partialUTF8 + [0]) {
+          if let text = Self.stringFromValidUTF8(partialUTF8) {
             partialUTF8.removeAll()
             if !text.isEmpty {
               onToken(text)
@@ -309,7 +309,7 @@ import Foundation
         cursor += 1
       }
 
-      if !partialUTF8.isEmpty, let tail = String(validatingUTF8: partialUTF8 + [0]), !tail.isEmpty {
+      if !partialUTF8.isEmpty, let tail = Self.stringFromValidUTF8(partialUTF8), !tail.isEmpty {
         onToken(tail)
       }
     }
@@ -497,6 +497,11 @@ import Foundation
 
       guard count > 0 else { return [] }
       return Array(buffer.prefix(Int(count)))
+    }
+
+    private static func stringFromValidUTF8(_ bytes: [CChar]) -> String? {
+      let codeUnits = bytes.map { UInt8(bitPattern: $0) }
+      return String(bytes: codeUnits, encoding: .utf8)
     }
 
     private static func makeSampler(temperature: Float) -> UnsafeMutablePointer<llama_sampler>? {

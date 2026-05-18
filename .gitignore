@@ -14,6 +14,9 @@ ios/GemmaPi/.swiftpm/
 ios/GemmaPi/Pods/
 ios/GemmaPi/LocalLiteRT/
 ios/GemmaPi/LocalLlama/
+ios/GemmaPi/LocalMediaPipe/Artifacts/
+ios/GemmaPi/LocalMediaPipe/.swiftpm/
+ios/GemmaPi/LocalSherpaOnnx/
 ios/GemmaPi/LocalSigning.xcconfig
 *.litertlm
 *.gguf

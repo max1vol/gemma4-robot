@@ -18,7 +18,7 @@ This is a private-device iPhone app scaffold for running Gemma 4 E2B on the phon
 - iOS can listen for incoming TCP connections while the app is active, but it is not a reliable always-on background server. The outbound iPhone-to-Pi connection is the right default for this setup.
 - The checked-in app refuses to generate unless a real runtime is linked and the model loads successfully. There are no fake model responses in the fallback path.
 - The iPhone Gemma bridge accepts text, image, and audio prompt parts when the projector is loaded.
-- The current Pi voice bot records from the USB webcam microphone, sends the WAV to iPhone Gemma as raw audio input, streams text back to the full-screen terminal display, then streams iPhone Kokoro TTS audio back to Pi HDMI playback.
+- The current Pi voice bot records from the USB microphone, sends the WAV to iPhone Gemma as raw audio input, streams text back to the full-screen terminal display, then streams iPhone Piper TTS audio back to Pi HDMI playback.
 
 ## Runtime Dependency
 
@@ -34,7 +34,7 @@ The framework is written under ignored `ios/GemmaPi/LocalLlama/`. The app target
 
 The LiteRT-LM Swift package is still present as a fallback dependency, but the app prefers `llama.cpp` when `llama.framework` is linked.
 
-The iPhone TTS runtime uses FluidAudio. `fluid-kokoro-ane` is the default and the only selectable app UI backend right now because it was validated with Gemma loaded. `fluid-pocket` remains in code for comparison, but it is not exposed in the app until it is revalidated on the same device with Gemma loaded.
+The iPhone TTS runtime uses Piper Ryan High through sherpa-onnx. `piper-ryan-high` is the default and the only selectable app UI backend.
 
 Benchmark report:
 
@@ -158,8 +158,8 @@ ios/GemmaPi/scripts/device_app.sh logs --audio-recording-smoke
 The 2026-05-17 iPhone smoke run recorded a 1.283 second WAV from the app, sent
 that WAV to native Gemma audio input through `llama.cpp`/`mtmd`, generated a
 text response, and produced no new crash report. This specifically validates
-the app microphone path; the separate OpenAI TTS audio benchmark validates a
-known spoken phrase and measured the text-vs-audio overhead.
+the app microphone path; the separate spoken-audio benchmark validates a known
+spoken phrase and measured the text-vs-audio overhead.
 
 Check state:
 
@@ -176,7 +176,7 @@ curl -sS --max-time 600 \
   -o /tmp/iphone-tts.raw \
   -X POST http://127.0.0.1:8765/tts-stream \
   -H 'Content-Type: application/json' \
-  -d '{"text":"Hello from iPhone text to speech.","tts_backend":"fluid-kokoro-ane","timeout":600}'
+  -d '{"text":"Hello from iPhone text to speech.","tts_backend":"piper-ryan-high","timeout":600}'
 ```
 
 The response body is raw PCM with headers:
@@ -205,22 +205,14 @@ curl -sS --max-time 900 \
 Measured on the connected iPhone with Gemma already loaded:
 
 ```text
-fluid-kokoro-ane / af_heart:
-  audio: 2.975 s
-  elapsed: 1.046 s
-  first audio: 1.038 s
-  realtime factor: 2.84x
-  chunks: 15
-
-fluid-pocket / alba:
-  audio: 3.360 s
-  elapsed: 4.484 s
-  first audio: 3.261 s
-  realtime factor: 0.75x
-  chunks: 42
+piper-ryan-high / en_US-ryan-high:
+  sample rate: 24000 Hz
+  output: raw mono S16_LE PCM chunks
 ```
 
-The first cold `fluid-kokoro-ane` request can take much longer because FluidAudio downloads and loads model assets; one observed cold bridge call took about 56 seconds wall-clock while the actual iPhone synthesis metric was 4.54 seconds for 2.52 seconds of audio. Warm requests are the useful latency number for the voice loop.
+The first cold `piper-ryan-high` request can take longer because the app
+downloads and extracts the Piper assets. Warm requests are the useful latency
+number for the voice loop.
 
 ## Pi Voice Bot
 
@@ -241,12 +233,12 @@ Current command shape:
   --channels 2 \
   --transcription-provider none \
   --tts-provider iphone \
-  --iphone-tts-backend fluid-kokoro-ane \
+  --iphone-tts-backend piper-ryan-high \
   --fullscreen-terminal \
   --startup-greeting=
 ```
 
-The USB webcam microphone currently works as `plughw:Camera,0` at 48 kHz stereo. Mono capture failed on this device with an ALSA input/output error, so keep `--sample-rate 48000 --channels 2` for the voice bot.
+The USB microphone currently works as `plughw:Camera,0` at 48 kHz stereo. Mono capture failed on this ALSA device with an input/output error, so keep `--sample-rate 48000 --channels 2` for the voice bot.
 
 The voice bot writes a JSON status file and also renders a full-screen terminal
 view. It shows recording, sending, receiving, and playback states, the audio

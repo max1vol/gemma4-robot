@@ -111,7 +111,7 @@ Setup:
 - Runtime: `llama.cpp` Metal GPU plus `libmtmd`
 - Model: `gemma-4-E2B-it-Q4_K_M.gguf`
 - Projector: `mmproj-F16.gguf`
-- Test audio: OpenAI TTS WAV saying `hello, my name is Max`
+- Test audio: generated WAV saying `hello, my name is Max`
 - Audio file: 4.65 s mono WAV, 223,244 bytes, generated under ignored `out/audio-input-benchmark/`
 - Prompt instruction: do not use emojis
 
@@ -152,5 +152,5 @@ Post-fix validation on the physical iPhone:
 
 - Build succeeded.
 - Text bridge request succeeded.
-- OpenAI TTS WAV native audio request succeeded twice.
+- Generated WAV native audio request succeeded twice.
 - Launch arg `--audio-recording-smoke` recorded a 1.283 s WAV through the iPhone microphone path, decoded it through mtmd as audio, generated a Gemma response, released the recorder after callback drain, and produced no new crash report.

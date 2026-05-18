@@ -121,13 +121,7 @@ Then sync `bin/gemma-agent-harness` to the Pi along with the repo files.
 
 ## 8. Install Boot Services
 
-Allow the kiosk X session to be launched from SSH/systemd:
-
-```sh
-sudo sh -c 'printf "allowed_users=anybody\nneeds_root_rights=yes\n" > /etc/X11/Xwrapper.config'
-```
-
-Install and enable the voice bot and HDMI kiosk services:
+Install and enable the voice bot and HDMI camera overlay services:
 
 ```sh
 sudo cp ~/gemma4-robot/scripts/voice-kit/systemd/gemma-voice-bot.service /etc/systemd/system/
@@ -199,14 +193,15 @@ Start the kiosk:
 Logs:
 
 ```text
-/tmp/gemma4-kiosk-http.log
-/tmp/gemma4-kiosk-x.log
+/tmp/gemma4-vision-overlay.log
 ```
 
-The kiosk serves a local page at `http://127.0.0.1:8765/` and displays:
+The kiosk draws directly to `/dev/fb0`; it does not run Chrome or X. It displays:
 
-- latest transcribed user input
-- latest model output
+- the live CSI Pi camera feed from `rpicam-vid --codec yuv420`
+- MediaPipe pose landmarks returned by the iPhone bridge
+- latest model output from `~/gemma4-robot/kiosk/status.json`
+- squat count and coaching state from `~/gemma4-robot/kiosk/vision_state.json`
 
 ## 11. Stop Or Restart
 

@@ -1,12 +1,15 @@
-# Gemma4 Robot
+# Gemma4: offline paper & voice teacher
 
-Gemma4 Robot is a hardware project for the future of learning and healthy
-habits. Its primary feature is a paper-based Science and Mathematics coach: the
-system creates worksheets, writes them on paper with a pen plotter, reads the
-student's handwritten work with a camera, uses Gemma 4 to grade the reasoning,
-and writes feedback directly back onto the same paper. Its second feature is an
-active sports coach that uses camera-based pose estimation to count exercises
-such as squats, push-ups, and jumps.
+Gemma4: offline paper & voice teacher is a hardware project for the future of
+learning and healthy habits. The repository remains named `gemma4-robot`, while
+the project title describes the actual experience: an offline teacher that can
+talk with the learner and work directly on paper. Its primary feature is a
+paper-based Science and Mathematics coach: the system creates worksheets, writes
+them on paper with a pen plotter, reads the student's handwritten work with a
+camera, uses Gemma 4 to grade the reasoning, and writes feedback directly back
+onto the same paper. Its second feature is an active sports coach that uses
+camera-based pose estimation to count exercises such as squats, push-ups, and
+jumps.
 
 The device is meant to be controlled naturally, without a keyboard. The user
 talks to it through a microphone, shows work and movement through cameras, and
